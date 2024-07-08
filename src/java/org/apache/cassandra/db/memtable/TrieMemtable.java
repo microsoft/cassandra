@@ -64,7 +64,6 @@ import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.index.transactions.UpdateTransaction;
 import org.apache.cassandra.io.compress.BufferType;
 import org.apache.cassandra.io.sstable.SSTableReadsListener;
-import org.apache.cassandra.metrics.TableMetrics;
 import org.apache.cassandra.metrics.TrieMemtableMetricsView;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.TableMetadataRef;
@@ -91,24 +90,7 @@ public class TrieMemtable extends AbstractShardedMemtable
     private static final Logger logger = LoggerFactory.getLogger(TrieMemtable.class);
 
     /** Buffer type to use for memtable tries (on- vs off-heap) */
-    public static final BufferType BUFFER_TYPE;
-
-    static
-    {
-        switch (DatabaseDescriptor.getMemtableAllocationType())
-        {
-        case unslabbed_heap_buffers:
-        case heap_buffers:
-            BUFFER_TYPE = BufferType.ON_HEAP;
-            break;
-        case offheap_buffers:
-        case offheap_objects:
-            BUFFER_TYPE = BufferType.OFF_HEAP;
-            break;
-        default:
-            throw new AssertionError();
-        }
-    }
+    public static final BufferType BUFFER_TYPE = DatabaseDescriptor.getMemtableAllocationType().toBufferType();
 
     /** If keys is below this length, we will use a recursive procedure for inserting data in the memtable trie. */
     @VisibleForTesting
@@ -696,10 +678,10 @@ public class TrieMemtable extends AbstractShardedMemtable
         }
 
         @Override
-        public TableMetrics.ReleasableMetric createMemtableMetrics(TableMetadataRef metadataRef)
+        public Runnable createMemtableMetricsReleaser(TableMetadataRef metadataRef)
         {
-            TrieMemtableMetricsView metrics = new TrieMemtableMetricsView(metadataRef.keyspace, metadataRef.name);
-            return metrics::release;
+            // Metrics are the same for all shards, so we can release them all at once.
+            return () -> TrieMemtableMetricsView.release(metadataRef.keyspace, metadataRef.name);
         }
 
         public boolean equals(Object o)

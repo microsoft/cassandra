@@ -30,6 +30,7 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.tcm.ClusterMetadata;
 
 import static org.apache.cassandra.net.Verb.GOSSIP_DIGEST_ACK;
 
@@ -42,12 +43,10 @@ public class GossipDigestSynVerbHandler extends GossipVerbHandler<GossipDigestSy
     public void doVerb(Message<GossipDigestSyn> message)
     {
         InetAddressAndPort from = message.from();
-        if (logger.isTraceEnabled())
-            logger.trace("Received a GossipDigestSynMessage from {}", from);
+        logger.trace("Received a GossipDigestSynMessage from {}", from);
         if (!Gossiper.instance.isEnabled() && !NewGossiper.instance.isInShadowRound())
         {
-            if (logger.isTraceEnabled())
-                logger.trace("Ignoring GossipDigestSynMessage because gossip is disabled");
+            logger.trace("Ignoring GossipDigestSynMessage because gossip is disabled");
             return;
         }
 
@@ -62,6 +61,12 @@ public class GossipDigestSynVerbHandler extends GossipVerbHandler<GossipDigestSy
         if (gDigestMessage.partioner != null && !gDigestMessage.partioner.equals(DatabaseDescriptor.getPartitionerName()))
         {
             logger.warn("Partitioner mismatch from {} {}!={}", from, gDigestMessage.partioner, DatabaseDescriptor.getPartitionerName());
+            return;
+        }
+
+        if (gDigestMessage.metadataId != ClusterMetadata.current().metadataIdentifier)
+        {
+            logger.warn("Cluster metadata identifier mismatch from {} {}!={}", from, gDigestMessage.metadataId, ClusterMetadata.current().metadataIdentifier);
             return;
         }
 
@@ -104,8 +109,7 @@ public class GossipDigestSynVerbHandler extends GossipVerbHandler<GossipDigestSy
                                                      createShadowReply() :
                                                      createNormalReply(gDigestList);
 
-        if (logger.isTraceEnabled())
-            logger.trace("Sending a GossipDigestAckMessage to {}", from);
+        logger.trace("Sending a GossipDigestAckMessage to {}", from);
         MessagingService.instance().send(gDigestAckMessage, from);
 
         super.doVerb(message);

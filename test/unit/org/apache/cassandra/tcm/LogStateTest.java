@@ -29,15 +29,15 @@ import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.dht.Murmur3Partitioner;
-import org.apache.cassandra.schema.DistributedSchema;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.tcm.extensions.ExtensionValue;
 import org.apache.cassandra.tcm.listeners.MetadataSnapshotListener;
+import org.apache.cassandra.tcm.listeners.SchemaListener;
 import org.apache.cassandra.tcm.log.LocalLog;
 import org.apache.cassandra.tcm.log.LogStorage;
 import org.apache.cassandra.tcm.ownership.UniformRangePlacement;
 import org.apache.cassandra.tcm.transformations.CustomTransformation;
-import org.apache.cassandra.tcm.transformations.SealPeriod;
+import org.apache.cassandra.tcm.transformations.TriggerSnapshot;
 import org.apache.cassandra.utils.FBUtilities;
 
 import static org.junit.Assert.assertEquals;
@@ -54,10 +54,13 @@ public class LogStateTest
         LogStorage logStorage = LogStorage.SystemKeyspace;
         MetadataSnapshots snapshots = new MetadataSnapshots.SystemKeyspaceMetadataSnapshots();
         ClusterMetadata initial = new ClusterMetadata(DatabaseDescriptor.getPartitioner());
-        LocalLog.LogSpec logSpec = new LocalLog.LogSpec().withInitialState(initial)
-                                                         .withStorage(logStorage)
-                                                         .withLogListener(new MetadataSnapshotListener());
-        LocalLog log = LocalLog.sync(logSpec);
+        LocalLog.LogSpec logSpec = LocalLog.logSpec()
+                                           .sync()
+                                           .withInitialState(initial)
+                                           .withStorage(logStorage)
+                                           .withLogListener(new MetadataSnapshotListener())
+                                           .withListener(new SchemaListener(true));
+        LocalLog log = logSpec.createLog();
         ClusterMetadataService cms = new ClusterMetadataService(new UniformRangePlacement(),
                                                                 snapshots,
                                                                 log,
@@ -66,15 +69,14 @@ public class LogStateTest
                                                                 false);
         ClusterMetadataService.unsetInstance();
         ClusterMetadataService.setInstance(cms);
-        initial.schema.initializeKeyspaceInstances(DistributedSchema.empty());
-        log.ready();
+        log.readyUnchecked();
         log.bootstrap(FBUtilities.getBroadcastAddressAndPort());
     }
 
     @Test
     public void testRevertEpoch()
     {
-        ClusterMetadataService.instance().sealPeriod();
+        ClusterMetadataService.instance().triggerSnapshot();
         List<Epoch> customEpochs = new ArrayList<>(40);
         for (int i=0; i < 10; i++)
         {
@@ -85,18 +87,15 @@ public class LogStateTest
                                                                        new CustomTransformation.PokeInt((int) ClusterMetadata.current().epoch.getEpoch())));
                 customEpochs.add(ClusterMetadata.current().epoch);
             }
-            ClusterMetadataService.instance().commit(SealPeriod.instance);
+            ClusterMetadataService.instance().commit(TriggerSnapshot.instance);
         }
 
         for (Epoch epoch : customEpochs)
         {
             ClusterMetadataService.instance().revertToEpoch(epoch);
             ExtensionValue<?> val = ClusterMetadata.current().extensions.get(CustomTransformation.PokeInt.METADATA_KEY);
-            if (val == null)
-                assertEquals(Epoch.create(2), epoch); // not yet any ints poked at epoch = 2
-            else
-                // -1 since we poke the previous int to the extension:
-                assertEquals((int)(epoch.getEpoch() - 1),  ClusterMetadata.current().extensions.get(CustomTransformation.PokeInt.METADATA_KEY).getValue());
+            // -1 since we poke the previous int to the extension:
+            assertEquals((int)(epoch.getEpoch() - 1),  ClusterMetadata.current().extensions.get(CustomTransformation.PokeInt.METADATA_KEY).getValue());
         }
     }
 }

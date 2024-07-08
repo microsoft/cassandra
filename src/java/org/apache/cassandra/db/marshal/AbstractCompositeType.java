@@ -23,7 +23,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.regex.Pattern;
 
-import org.apache.cassandra.cql3.Term;
+import org.apache.cassandra.cql3.terms.Term;
 import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -63,7 +63,7 @@ public abstract class AbstractCompositeType extends AbstractType<ByteBuffer>
         int offsetL = startingOffset(isStaticL);
         int offsetR = startingOffset(isStaticR);
 
-        while (!accessorL.isEmptyFromOffset(left, offsetL) && !accessorR.isEmptyFromOffset(right, offsetL))
+        while (!accessorL.isEmptyFromOffset(left, offsetL) && !accessorR.isEmptyFromOffset(right, offsetR))
         {
             AbstractType<?> comparator = getComparator(i, left, accessorL, right, accessorR, offsetL, offsetR);
             offsetL += getComparatorSize(i, left, accessorL, offsetL);

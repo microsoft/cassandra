@@ -18,6 +18,7 @@
 
 package org.apache.cassandra.tcm.log;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -42,9 +43,10 @@ import org.apache.cassandra.dht.LocalPartitioner;
 import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.Epoch;
+import org.apache.cassandra.tcm.MetadataSnapshots;
 import org.apache.cassandra.tcm.transformations.CustomTransformation;
 import org.apache.cassandra.tcm.transformations.ForceSnapshot;
-import org.apache.cassandra.tcm.transformations.SealPeriod;
+import org.apache.cassandra.tcm.transformations.TriggerSnapshot;
 import org.apache.cassandra.utils.concurrent.CountDownLatch;
 
 import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFactory;
@@ -63,8 +65,11 @@ public class LocalLogTest
     @Test
     public void appendToFillGapWithConsecutiveBufferedEntries()
     {
-        LocalLog log = LocalLog.sync(new LocalLog.LogSpec().withInitialState(cm()));
-        log.ready();
+        LocalLog log = LocalLog.logSpec()
+                               .sync()
+                               .withInitialState(cm())
+                               .createLog();
+        log.readyUnchecked();
         Epoch start = log.metadata().epoch;
         assertEquals(EMPTY, start);
 
@@ -85,21 +90,24 @@ public class LocalLogTest
     }
 
     @Test
-    public void sealPeriodForceSnapshotCollisionWithGap()
+    public void forceSnapshotCollisionWithGap()
     {
-        LocalLog log = LocalLog.sync(new LocalLog.LogSpec().withInitialState(cm()));
-        log.ready();
+        LocalLog log = LocalLog.logSpec()
+                               .sync()
+                               .withInitialState(cm())
+                               .createLog();
+        log.readyUnchecked();
 
-        List<Entry> entries =new ArrayList<>();
+        List<Entry> entries = new ArrayList<>();
         for (int i = 1; i <= 9; i++)
             entries.add(entry(i));
         entries.add(new Entry(Entry.Id.NONE,
                               Epoch.create(11),
-                              SealPeriod.instance));
+                              TriggerSnapshot.instance));
 
         entries.add(new Entry(Entry.Id.NONE,
                               Epoch.create(11),
-                              new ForceSnapshot(new ClusterMetadata(new LocalPartitioner(IntegerType.instance)).forceEpoch(Epoch.create(11)))));
+                              new ForceSnapshot(new ClusterMetadata(Murmur3Partitioner.instance).forceEpoch(Epoch.create(11)))));
         Collections.shuffle(entries);
         log.append(entries);
 
@@ -108,29 +116,82 @@ public class LocalLogTest
         assertEquals(11, tail.epoch.getEpoch());
     }
 
+    @Test
+    public void forceSnapshotIsNotPersisted()
+    {
+        LogStorage storage = new LogStorage()
+        {
+            @Override
+            public void append(Entry entry)
+            {
+                throw new RuntimeException("we should not append anything");
+            }
+
+            @Override
+            public LogState getPersistedLogState()
+            {
+                return LogState.EMPTY;
+            }
+
+            @Override
+            public LogState getLogStateBetween(ClusterMetadata base, Epoch end)
+            {
+                return LogState.EMPTY;
+            }
+
+            @Override
+            public EntryHolder getEntries(Epoch since) throws IOException
+            {
+                return new EntryHolder(since);
+            }
+
+            @Override
+            public MetadataSnapshots snapshots()
+            {
+                return MetadataSnapshots.NO_OP;
+            }
+        };
+        LocalLog log = LocalLog.logSpec()
+                               .sync()
+                               .withInitialState(cm())
+                               .withStorage(storage)
+                               .createLog();
+        log.readyUnchecked();
+
+        Entry entry = new Entry(Entry.Id.NONE,
+                                Epoch.create(11),
+                                new ForceSnapshot(new ClusterMetadata(new LocalPartitioner(IntegerType.instance)).forceEpoch(Epoch.create(11))));
+        log.append(entry);
+        ClusterMetadata tail = log.waitForHighestConsecutive();
+
+        assertEquals(11, tail.epoch.getEpoch());
+    }
 
     @Test
     public void multipleSnapshotEntries()
     {
-        LocalLog log = LocalLog.sync(new LocalLog.LogSpec().withInitialState(cm()));
-        log.ready();
+        LocalLog log = LocalLog.logSpec()
+                               .sync()
+                               .withInitialState(cm())
+                               .createLog();
+        log.readyUnchecked();
 
         List<Entry> entries =new ArrayList<>();
         for (int i = 1; i <= 9; i++)
             entries.add(entry(i));
         entries.add(new Entry(Entry.Id.NONE,
                               Epoch.create(11),
-                              SealPeriod.instance));
+                              TriggerSnapshot.instance));
 
         entries.add(new Entry(Entry.Id.NONE,
                               Epoch.create(11),
-                              new ForceSnapshot(new ClusterMetadata(new LocalPartitioner(IntegerType.instance)).forceEpoch(Epoch.create(11)))));
+                              new ForceSnapshot(new ClusterMetadata(Murmur3Partitioner.instance).forceEpoch(Epoch.create(11)))));
         entries.add(new Entry(Entry.Id.NONE,
                               Epoch.create(21),
-                              new ForceSnapshot(new ClusterMetadata(new LocalPartitioner(IntegerType.instance)).forceEpoch(Epoch.create(21)))));
+                              new ForceSnapshot(new ClusterMetadata(Murmur3Partitioner.instance).forceEpoch(Epoch.create(21)))));
         entries.add(new Entry(Entry.Id.NONE,
                               Epoch.create(31),
-                              new ForceSnapshot(new ClusterMetadata(new LocalPartitioner(IntegerType.instance)).forceEpoch(Epoch.create(31)))));
+                              new ForceSnapshot(new ClusterMetadata(Murmur3Partitioner.instance).forceEpoch(Epoch.create(31)))));
 
         Collections.shuffle(entries);
         log.append(entries);
@@ -165,7 +226,7 @@ public class LocalLogTest
         CountDownLatch finish = CountDownLatch.newCountDownLatch(threads);
         CountDownLatch finishReaders = CountDownLatch.newCountDownLatch(threads);
         ExecutorPlus executor = executorFactory().configurePooled("APPENDER", threads * 2).build();
-        LocalLog log = LocalLog.asyncForTests(cm());
+        LocalLog log = LocalLog.logSpec().withInitialState(cm()).createLog();
 
         List<Entry> committed = new CopyOnWriteArrayList<>(); // doesn't need to be concurrent, since log is single-threaded
         log.addListener((e, m) -> committed.add(e));

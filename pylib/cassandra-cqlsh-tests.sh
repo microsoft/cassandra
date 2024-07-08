@@ -43,7 +43,7 @@ export CASSANDRA_DIR=${WORKSPACE}
 java_version=$(java -version 2>&1 | awk -F '"' '/version/ {print $2}' | awk -F. '{print $1}')
 version=$(grep 'property\s*name=\"base.version\"' ${CASSANDRA_DIR}/build.xml |sed -ne 's/.*value=\"\([^"]*\)\".*/\1/p')
 
-python_version="3.7"
+python_version="3.8"
 command -v python3 >/dev/null 2>&1 && python_version="$(python3 -V | awk '{print $2}' | awk -F'.' '{print $1"."$2}')"
 
 export TESTSUITE_NAME="cqlshlib.python${python_version}.jdk${java_version}"
@@ -75,6 +75,7 @@ if [ "$cython" = "yes" ]; then
 else
     TESTSUITE_NAME="${TESTSUITE_NAME}.no_cython"
 fi
+TESTSUITE_NAME="${TESTSUITE_NAME}.$(uname -m)"
 
 ################################
 #
@@ -100,7 +101,7 @@ sed -r "s/<[\/]?testsuites>//g" ${BUILD_DIR}/test/output/cqlshlib.xml > /tmp/cql
 cat /tmp/cqlshlib.xml > ${BUILD_DIR}/test/output/cqlshlib.xml
 
 # don't do inline sed for linux+mac compat
-sed "s/testsuite errors=\(\".*\"\) failures=\(\".*\"\) hostname=\(\".*\"\) name=\"pytest\"/testsuite errors=\1 failures=\2 hostname=\3 name=\"${TESTSUITE_NAME}\"/g" ${BUILD_DIR}/test/output/cqlshlib.xml > /tmp/cqlshlib.xml
+sed "s/testsuite name=\"pytest\"/testsuite name=\"${TESTSUITE_NAME}\"/g" ${BUILD_DIR}/test/output/cqlshlib.xml > /tmp/cqlshlib.xml
 cat /tmp/cqlshlib.xml > ${BUILD_DIR}/test/output/cqlshlib.xml
 sed "s/testcase classname=\"cqlshlib./testcase classname=\"${TESTSUITE_NAME}./g" ${BUILD_DIR}/test/output/cqlshlib.xml > /tmp/cqlshlib.xml
 cat /tmp/cqlshlib.xml > ${BUILD_DIR}/test/output/cqlshlib.xml

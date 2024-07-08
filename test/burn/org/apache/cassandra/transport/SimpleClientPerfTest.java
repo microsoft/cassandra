@@ -159,7 +159,7 @@ public class SimpleClientPerfTest
                                             .withPort(port)
                                             .build();
 
-        ClientMetrics.instance.init(Collections.singleton(server));
+        ClientMetrics.instance.init(server);
         server.start();
 
         Message.Type.QUERY.unsafeSetCodec(new Message.Codec<QueryMessage>()
@@ -169,7 +169,8 @@ public class SimpleClientPerfTest
                 QueryMessage queryMessage = QueryMessage.codec.decode(body, version);
                 return new QueryMessage(queryMessage.query, queryMessage.options)
                 {
-                    protected Message.Response execute(QueryState state, long queryStartNanoTime, boolean traceRequest)
+                    @Override
+                    protected Message.Response execute(QueryState state, Dispatcher.RequestTime requestTime, boolean traceRequest)
                     {
                         int idx = Integer.parseInt(queryMessage.query); // unused
                         return generateRows(idx, responseCaps);

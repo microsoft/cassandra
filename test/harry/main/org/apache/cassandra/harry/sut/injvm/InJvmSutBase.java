@@ -129,48 +129,56 @@ public class InJvmSutBase<NODE extends IInstance, CLUSTER extends ICluster<NODE>
         cluster.schemaChange(statement);
     }
 
-    public Object[][] execute(String statement, ConsistencyLevel cl, Object... bindings)
+    public Object[][] execute(String statement, ConsistencyLevel cl, int pageSize, Object... bindings)
     {
-        return execute(statement, cl, loadBalancingStrategy.get(), bindings);
+        return execute(statement, cl, loadBalancingStrategy.get(), pageSize, bindings);
     }
 
-    public Object[][] execute(String statement, ConsistencyLevel cl, int coordinator, Object... bindings)
+    public Object[][] execute(String statement, ConsistencyLevel cl, Object... bindings)
+    {
+        return execute(statement, cl, loadBalancingStrategy.get(), 1, bindings);
+    }
+
+    public Object[][] execute(String statement, ConsistencyLevel cl, int coordinator, int pageSize, Object... bindings)
     {
         if (isShutdown.get())
             throw new RuntimeException("Instance is shut down");
 
-        try
+        while (true)
         {
-            if (cl == ConsistencyLevel.NODE_LOCAL)
+            try
             {
-                return cluster.get(coordinator)
-                              .executeInternal(statement, bindings);
+                if (cl == ConsistencyLevel.NODE_LOCAL)
+                {
+                    return cluster.get(coordinator)
+                                  .executeInternal(statement, bindings);
+                }
+                else if (StringUtils.startsWithIgnoreCase(statement, "SELECT"))
+                {
+                    return Iterators.toArray(cluster
+                                             // round-robin
+                                             .coordinator(coordinator)
+                                             .executeWithPaging(statement, toApiCl(cl), pageSize, bindings),
+                                             Object[].class);
+                }
+                else
+                {
+                    return cluster
+                           // round-robin
+                           .coordinator(coordinator)
+                           .execute(statement, toApiCl(cl), bindings);
+                }
             }
-            else if (StringUtils.startsWithIgnoreCase(statement, "SELECT"))
+            catch (Throwable t)
             {
-                return Iterators.toArray(cluster
-                                         // round-robin
-                                         .coordinator(coordinator)
-                                         .executeWithPaging(statement, toApiCl(cl), 1, bindings),
-                                         Object[].class);
-            }
-            else
-            {
-                return cluster
-                       // round-robin
-                       .coordinator(coordinator)
-                       .execute(statement, toApiCl(cl), bindings);
-            }
-        }
-        catch (Throwable t)
-        {
-            if (retryStrategy.apply(t))
-                return execute(statement, cl, bindings);
+                if (retryStrategy.apply(t))
+                    continue;
 
-            logger.error(String.format("Caught error while trying execute statement %s (%s): %s",
-                                       statement, Arrays.toString(bindings), t.getMessage()),
-                         t);
-            throw t;
+                logger.error(String.format("Caught error while trying execute statement %s (%s): %s",
+                                           statement, Arrays.toString(bindings), t.getMessage()),
+                             t);
+                throw t;
+            }
         }
     }
 

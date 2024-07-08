@@ -21,6 +21,7 @@ package org.apache.cassandra.distributed.test.log;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.PrimitiveIterator;
@@ -28,6 +29,7 @@ import java.util.Random;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
+import org.apache.cassandra.harry.sut.TokenPlacementModel.Replica;
 import org.junit.Test;
 
 import org.apache.cassandra.harry.sut.TokenPlacementModel;
@@ -55,7 +57,13 @@ public class PlacementSimulatorTest
     @Test
     public void testMove()
     {
-        testMove(100, 200, 300, 400, 350, new SimpleReplicationFactor(3));
+        testMove(100);
+        testMove(Long.MIN_VALUE);
+    }
+
+    public void testMove(long minToken)
+    {
+        testMove(minToken, 200, 300, 400, 350, new SimpleReplicationFactor(3));
 
         Random rng = new Random();
         for (int i = 0; i < 1000; i++)
@@ -108,7 +116,13 @@ public class PlacementSimulatorTest
     @Test
     public void testBootstrap()
     {
-        testBootstrap(100, 200, 300, 400, 350, new SimpleReplicationFactor(3));
+        testBootstrap(350);
+        testBootstrap(Long.MIN_VALUE);
+    }
+
+    public void testBootstrap(long newToken)
+    {
+        testBootstrap(100, 200, 300, 400, newToken, new SimpleReplicationFactor(3));
 
         Random rng = new Random();
         for (int i = 0; i < 1000; i++)
@@ -162,7 +176,13 @@ public class PlacementSimulatorTest
     @Test
     public void testDecommission()
     {
-        testDecommission(100, 200, 300, 400, 350, new SimpleReplicationFactor(3));
+        testDecommission(100);
+        testDecommission(Long.MIN_VALUE);
+    }
+
+    public void testDecommission(long minToken)
+    {
+        testDecommission(minToken, 200, 300, 400, 350, new SimpleReplicationFactor(3));
 
         Random rng = new Random();
         for (int i = 0; i < 1000; i++)
@@ -308,6 +328,7 @@ public class PlacementSimulatorTest
             List<Node> nodes = new ArrayList<>(10);
             for (int i = 1; i <= 10; i++)
                 nodes.add(factory.make(i, 1, 1));
+            nodes.sort(Comparator.comparing(Node::token));
 
             SimulatedPlacements sim = new SimulatedPlacements(rf, nodes, rf.replicate(nodes).asMap(), rf.replicate(nodes).asMap(), Collections.emptyList());
             Node newNode = factory.make(11, 1, 1);
@@ -325,7 +346,7 @@ public class PlacementSimulatorTest
             List<Node> nodes = new ArrayList<>(10);
             for (int i = 1; i <= 10; i++)
                 nodes.add(factory.make(i, 1, 1));
-
+            nodes.sort(Comparator.comparing(Node::token));
             Node toRemove = nodes.get(5);
             SimulatedPlacements sim = new SimulatedPlacements(rf, nodes, rf.replicate(nodes).asMap(), rf.replicate(nodes).asMap(), Collections.emptyList());
             revertPartiallyCompleteOp(sim, () -> leave(sim, toRemove), 2);
@@ -342,6 +363,7 @@ public class PlacementSimulatorTest
             List<Node> nodes = new ArrayList<>(10);
             for (int i = 1; i <= 10; i++)
                 nodes.add(factory.make(i, 1, 1));
+            nodes.sort(Comparator.comparing(Node::token));
 
             Node toReplace = nodes.get(5);
             SimulatedPlacements sim = new SimulatedPlacements(rf,
@@ -374,8 +396,8 @@ public class PlacementSimulatorTest
                                    Supplier<Transformations> opProvider,
                                    int stepsToExecute)
     {
-        Map<Range, List<Node>> startingReadPlacements = sim.readPlacements;
-        Map<Range, List<Node>> startingWritePlacements = sim.writePlacements;
+        Map<Range, List<Replica>> startingReadPlacements = sim.readPlacements;
+        Map<Range, List<Replica>> startingWritePlacements = sim.writePlacements;
         Transformations steps = opProvider.get();
         sim = sim.withStashed(steps);
         // execute the required steps

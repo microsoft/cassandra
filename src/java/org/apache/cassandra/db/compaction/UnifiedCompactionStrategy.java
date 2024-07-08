@@ -95,6 +95,7 @@ public class UnifiedCompactionStrategy extends AbstractCompactionStrategy
         super(cfs, options);
         this.controller = controller;
         estimatedRemainingTasks = 0;
+        lastExpiredCheck = Clock.Global.currentTimeMillis();
     }
 
     public static Map<String, String> validateOptions(Map<String, String> options) throws ConfigurationException
@@ -296,7 +297,9 @@ public class UnifiedCompactionStrategy extends AbstractCompactionStrategy
     private void maybeUpdateShardManager()
     {
         // TODO - modify ShardManager::isOutOfDate to take an Epoch
-        if (shardManager != null && !shardManager.isOutOfDate(ClusterMetadata.current().epoch.getEpoch()))
+        if (shardManager != null
+            && (cfs.localRangesWeighted().ringVersion == ColumnFamilyStore.RING_VERSION_IRRELEVANT
+                || !shardManager.isOutOfDate(ClusterMetadata.current().epoch.getEpoch())))
             return; // the disk boundaries (and thus the local ranges too) have not changed since the last time we calculated
 
         synchronized (this)
@@ -584,8 +587,7 @@ public class UnifiedCompactionStrategy extends AbstractCompactionStrategy
 
         void complete()
         {
-            if (logger.isTraceEnabled())
-                logger.trace("Level: {}", this);
+            logger.trace("Level: {}", this);
         }
 
         /**
@@ -632,10 +634,7 @@ public class UnifiedCompactionStrategy extends AbstractCompactionStrategy
                              index, sstables.size(), maxOverlap, buckets.size(), estimatedRemainingTasks);
 
             CompactionPick selected = selectedBucket.constructPick(controller);
-
-            if (logger.isTraceEnabled())
-                logger.trace("Returning compaction pick with selected compaction {}",
-                             selected);
+            logger.trace("Returning compaction pick with selected compaction {}", selected);
             return selected;
         }
 
@@ -662,8 +661,7 @@ public class UnifiedCompactionStrategy extends AbstractCompactionStrategy
         {
             List<SSTableReader> liveSet = sstables;
 
-            if (logger.isTraceEnabled())
-                logger.trace("Creating compaction pick with live set {}", liveSet);
+            logger.trace("Creating compaction pick with live set {}", liveSet);
 
             List<Set<SSTableReader>> overlaps = Overlaps.constructOverlapSets(liveSet,
                                                                               UnifiedCompactionStrategy::startsAfter,

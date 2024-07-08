@@ -80,7 +80,8 @@ public class FetchPeerLog
         {
             FetchPeerLog request = message.payload;
 
-            logger.info("Received peer log fetch request {} from {}: start = {}, current = {}", request, message.from(), message.payload.start, ClusterMetadata.current().epoch);
+            ClusterMetadata metadata = ClusterMetadata.current();
+            logger.info("Received peer log fetch request {} from {}: start = {}, current = {}", request, message.from(), message.payload.start, metadata.epoch);
             LogState delta = LogStorage.SystemKeyspace.getLogState(message.payload.start);
             TCMMetrics.instance.peerLogEntriesServed(message.payload.start, delta.latestEpoch());
             logger.info("Responding with log delta: {}", delta);

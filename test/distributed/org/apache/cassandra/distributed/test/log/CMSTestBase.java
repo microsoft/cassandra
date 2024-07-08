@@ -27,6 +27,7 @@ import org.apache.cassandra.distributed.api.IIsolatedExecutor;
 import org.apache.cassandra.harry.sut.TokenPlacementModel;
 import org.apache.cassandra.locator.IEndpointSnitch;
 import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.locator.MetaStrategy;
 import org.apache.cassandra.locator.Replica;
 import org.apache.cassandra.locator.ReplicaCollection;
 import org.apache.cassandra.schema.DistributedSchema;
@@ -40,7 +41,6 @@ import org.apache.cassandra.tcm.MetadataSnapshots;
 import org.apache.cassandra.tcm.Processor;
 import org.apache.cassandra.tcm.Transformation;
 import org.apache.cassandra.tcm.log.LocalLog;
-import org.apache.cassandra.tcm.ownership.EntireRange;
 import org.apache.cassandra.tcm.ownership.UniformRangePlacement;
 import org.apache.cassandra.tcm.transformations.AlterSchema;
 import org.apache.cassandra.tcm.transformations.cms.Initialize;
@@ -96,9 +96,11 @@ public class CMSTestBase
             this.rf = rf;
             schemaProvider = Mockito.mock(SchemaProvider.class);
             ClusterMetadata initial = new ClusterMetadata(partitioner);
-            LocalLog.LogSpec logSpec = new LocalLog.LogSpec().withInitialState(initial).withDefaultListeners(addListeners);
-            log = LocalLog.sync(logSpec);
-            log.ready();
+            log = LocalLog.logSpec()
+                          .sync()
+                          .withInitialState(initial)
+                          .withDefaultListeners(addListeners)
+                          .createLog();
 
             service = new ClusterMetadataService(new UniformRangePlacement(),
                                                  MetadataSnapshots.NO_OP,
@@ -108,6 +110,7 @@ public class CMSTestBase
                                                  true);
 
             ClusterMetadataService.setInstance(service);
+            log.readyUnchecked();
             log.bootstrap(FBUtilities.getBroadcastAddressAndPort());
             service.commit(new Initialize(ClusterMetadata.current()) {
                 public Result execute(ClusterMetadata prev)
@@ -115,7 +118,7 @@ public class CMSTestBase
                     ClusterMetadata next = baseState;
                     DistributedSchema initialSchema = new DistributedSchema(prev.schema.getKeyspaces());
                     ClusterMetadata.Transformer transformer = next.transformer().with(initialSchema);
-                    return Transformation.success(transformer, EntireRange.affectedRanges(prev));
+                    return Transformation.success(transformer, MetaStrategy.affectedRanges(prev));
                 }
 
             });

@@ -41,6 +41,11 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 
 import org.apache.cassandra.locator.RangesAtEndpoint;
+import org.apache.cassandra.net.Verb;
+import org.apache.cassandra.repair.messages.FailSession;
+import org.apache.cassandra.repair.messages.RepairMessage;
+import org.apache.cassandra.repair.state.ParticipateState;
+import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.utils.*;
 import org.apache.cassandra.utils.concurrent.Future;
 import org.apache.commons.lang3.time.DurationFormatUtils;
@@ -99,6 +104,7 @@ public class RepairCoordinator implements Runnable, ProgressEventNotifier, Repai
     private final List<ProgressListener> listeners = new ArrayList<>();
     private final AtomicReference<Throwable> firstError = new AtomicReference<>(null);
     final SharedContext ctx;
+    final Scheduler validationScheduler;
 
     private TraceState traceState;
 
@@ -116,6 +122,7 @@ public class RepairCoordinator implements Runnable, ProgressEventNotifier, Repai
                       int cmd, RepairOption options, String keyspace)
     {
         this.ctx = ctx;
+        this.validationScheduler = Scheduler.build(DatabaseDescriptor.getConcurrentMerkleTreeRequests());
         this.state = new CoordinatorState(ctx.clock(), cmd, keyspace, options);
         this.tag = "repair:" + cmd;
         this.validColumnFamilies = validColumnFamilies;
@@ -209,6 +216,17 @@ public class RepairCoordinator implements Runnable, ProgressEventNotifier, Repai
             reason = error != null ? error.toString() : "Some repair failed";
         }
         state.phase.fail(reason);
+        ParticipateState p = ctx.repair().participate(state.id);
+        if (p != null)
+            p.phase.fail(reason);
+        NeighborsAndRanges neighborsAndRanges = state.getNeighborsAndRanges();
+        // this is possible if the failure happened during input processing, in which case no particpates have been notified
+        if (neighborsAndRanges != null)
+        {
+            FailSession msg = new FailSession(state.id);
+            for (InetAddressAndPort participate : neighborsAndRanges.participants)
+                RepairMessage.sendMessageWithRetries(ctx, msg, Verb.FAILED_SESSION_MSG, participate);
+        }
         String completionMessage = String.format("Repair command #%d finished with error", state.cmd);
 
         // Note we rely on the first message being the reason for the failure
@@ -453,7 +471,7 @@ public class RepairCoordinator implements Runnable, ProgressEventNotifier, Repai
 
         ExecutorPlus executor = createExecutor();
         state.phase.repairSubmitted();
-        return task.perform(executor)
+        return task.perform(executor, validationScheduler)
                    // after adding the callback java could no longer infer the type...
                    .<Pair<CoordinatedRepairResult, Supplier<String>>>map(r -> Pair.create(r, task::successMessage))
                    .addCallback((s, f) -> executor.shutdown());
@@ -534,7 +552,7 @@ public class RepairCoordinator implements Runnable, ProgressEventNotifier, Repai
                     QueryOptions options = QueryOptions.forInternalCalls(ConsistencyLevel.ONE, Lists.newArrayList(sessionIdBytes,
                                                                                                                   tminBytes,
                                                                                                                   tmaxBytes));
-                    ResultMessage.Rows rows = statement.execute(forInternalCalls(), options, ctx.clock().nanoTime());
+                    ResultMessage.Rows rows = statement.execute(forInternalCalls(), options, new Dispatcher.RequestTime(ctx.clock().nanoTime()));
                     UntypedResultSet result = UntypedResultSet.create(rows.result);
 
                     for (UntypedResultSet.Row r : result)

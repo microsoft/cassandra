@@ -25,10 +25,19 @@ import java.util.stream.Collectors;
 import org.apache.cassandra.cql3.*;
 import org.apache.cassandra.cql3.functions.*;
 import org.apache.cassandra.cql3.selection.Selector.Factory;
+import org.apache.cassandra.cql3.terms.Constants;
+import org.apache.cassandra.cql3.terms.Lists;
+import org.apache.cassandra.cql3.terms.Maps;
+import org.apache.cassandra.cql3.terms.Sets;
+import org.apache.cassandra.cql3.terms.Term;
+import org.apache.cassandra.cql3.terms.Tuples;
+import org.apache.cassandra.cql3.terms.UserTypes;
+import org.apache.cassandra.cql3.terms.Vectors;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.schema.UserFunctions;
 import org.apache.cassandra.utils.Pair;
 
 import static org.apache.cassandra.cql3.selection.SelectorFactories.createFactoriesAndCollectColumnDefinitions;
@@ -411,8 +420,7 @@ public interface Selectable extends AssignmentTestable
                     name = AggregateFcts.countRowsFunction.name();
                     preparedArgs = Collections.emptyList();
                 }
-
-                Function fun = FunctionResolver.get(table.keyspace, name, preparedArgs, table.keyspace, table.name, null);
+                Function fun = FunctionResolver.get(table.keyspace, name, preparedArgs, table.keyspace, table.name, null, UserFunctions.getCurrentUserFunctions(name, table.keyspace));
 
                 if (fun == null)
                     throw new InvalidRequestException(String.format("Unknown function '%s'", functionName));
@@ -454,7 +462,7 @@ public interface Selectable extends AssignmentTestable
                 return factory;
 
             FunctionName name = FunctionName.nativeFunction(CastFcts.getFunctionName(type));
-            Function fun = FunctionResolver.get(table.keyspace, name, args, table.keyspace, table.name, null);
+            Function fun = FunctionResolver.get(table.keyspace, name, args, table.keyspace, table.name, null, UserFunctions.getCurrentUserFunctions(name, table.keyspace));
 
             if (fun == null)
             {

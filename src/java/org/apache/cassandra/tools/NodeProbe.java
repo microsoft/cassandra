@@ -1354,9 +1354,9 @@ public class NodeProbe implements AutoCloseable
         }
     }
 
-    public void stopNativeTransport()
+    public void stopNativeTransport(boolean force)
     {
-        ssProxy.stopNativeTransport();
+        ssProxy.stopNativeTransport(force);
     }
 
     public void startNativeTransport()
@@ -1561,9 +1561,15 @@ public class NodeProbe implements AutoCloseable
         ssProxy.loadNewSSTables(ksName, cfName);
     }
 
-    public List<String> importNewSSTables(String ksName, String cfName, Set<String> srcPaths, boolean resetLevel, boolean clearRepaired, boolean verifySSTables, boolean verifyTokens, boolean invalidateCaches, boolean extendedVerify, boolean copyData)
+    public List<String> importNewSSTables(String ksName, String cfName, Set<String> srcPaths, boolean resetLevel,
+                                          boolean clearRepaired, boolean verifySSTables, boolean verifyTokens,
+                                          boolean invalidateCaches, boolean extendedVerify, boolean copyData,
+                                          boolean failOnMissingIndex, boolean validateIndexChecksum)
     {
-        return getCfsProxy(ksName, cfName).importNewSSTables(srcPaths, resetLevel, clearRepaired, verifySSTables, verifyTokens, invalidateCaches, extendedVerify, copyData);
+        return getCfsProxy(ksName, cfName).importNewSSTables(srcPaths, resetLevel, clearRepaired,
+                                                             verifySSTables, verifyTokens, invalidateCaches,
+                                                             extendedVerify, copyData, failOnMissingIndex,
+                                                             validateIndexChecksum);
     }
 
     public void rebuildIndex(String ksName, String cfName, String... idxNames)
@@ -1854,7 +1860,9 @@ public class NodeProbe implements AutoCloseable
               case ThreadPoolMetrics.ACTIVE_TASKS:
               case ThreadPoolMetrics.PENDING_TASKS:
               case ThreadPoolMetrics.COMPLETED_TASKS:
+              case ThreadPoolMetrics.CORE_POOL_SIZE:
               case ThreadPoolMetrics.MAX_POOL_SIZE:
+              case ThreadPoolMetrics.MAX_TASKS_QUEUED:
                   return JMX.newMBeanProxy(mbeanServerConn, oName, CassandraMetricsRegistry.JmxGaugeMBean.class).getValue();
               case ThreadPoolMetrics.TOTAL_BLOCKED_TASKS:
               case ThreadPoolMetrics.CURRENTLY_BLOCKED_TASKS:
@@ -2049,7 +2057,7 @@ public class NodeProbe implements AutoCloseable
                 case "connections": // List<Map<String,String>> - list of all native connections and their properties
                 case "connectedNativeClients": // number of connected native clients
                 case "connectedNativeClientsByUser": // number of native clients by username
-                case "clientsByProtocolVersion": // number of native clients by username
+                case "clientsByProtocolVersion": // number of native clients by protocol version
                     return JMX.newMBeanProxy(mbeanServerConn,
                             new ObjectName("org.apache.cassandra.metrics:type=Client,name=" + metricName),
                             CassandraMetricsRegistry.JmxGaugeMBean.class).getValue();

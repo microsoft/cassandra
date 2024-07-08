@@ -85,6 +85,7 @@ public final class CreateIndexStatement extends AlterSchemaStatement
     private final List<IndexTarget.Raw> rawIndexTargets;
     private final IndexAttributes attrs;
     private final boolean ifNotExists;
+    private String expandedCql;
 
     private ClientState state;
 
@@ -101,6 +102,14 @@ public final class CreateIndexStatement extends AlterSchemaStatement
         this.rawIndexTargets = rawIndexTargets;
         this.attrs = attrs;
         this.ifNotExists = ifNotExists;
+    }
+
+    @Override
+    public String cql()
+    {
+        if (expandedCql != null)
+            return expandedCql;
+        return super.cql();
     }
 
     @Override
@@ -192,6 +201,8 @@ public final class CreateIndexStatement extends AlterSchemaStatement
             throw ire(INDEX_DUPLICATE_OF_EXISTING, index.name, equalIndex.name);
         }
 
+        this.expandedCql = index.toCqlString(table, ifNotExists);
+
         TableMetadata newTable = table.withSwapped(table.indexes.with(index));
         newTable.validate();
 
@@ -244,7 +255,7 @@ public final class CreateIndexStatement extends AlterSchemaStatement
             throw ire(ONLY_PARTITION_KEY, column);
 
         if (column.type.isFrozenCollection() && target.type != Type.FULL)
-            throw ire(CREATE_ON_FROZEN_COLUMN, target.type, column, column);
+            throw ire(CREATE_ON_FROZEN_COLUMN, target.type, column, column.name.toCQLString());
 
         if (!column.type.isFrozenCollection() && target.type == Type.FULL)
             throw ire(FULL_ON_FROZEN_COLLECTIONS);

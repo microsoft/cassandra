@@ -175,6 +175,14 @@ public class InboundMessageHandler extends AbstractMessageHandler
             noSpamLogger.info("{} incompatible schema encountered while deserializing a message", this, e);
             ClusterMetadataService.instance().fetchLogFromPeerAsync(header.from, header.epoch);
         }
+        catch (CMSIdentifierMismatchException e)
+        {
+            callbacks.onFailedDeserialize(size, header, e);
+            logger.error("{} is a member of a different CMS group. Forcing connection close.", header.from, e);
+            MessagingService.instance().closeOutbound(header.from);
+            // Sharable bytes will be released by the frame decoder
+            channel.close();
+        }
         catch (Throwable t)
         {
             JVMStabilityInspector.inspectThrowable(t);
@@ -372,6 +380,14 @@ public class InboundMessageHandler extends AbstractMessageHandler
                 callbacks.onFailedDeserialize(size, header, e);
                 noSpamLogger.info("{} incompatible schema encountered while deserializing a message", InboundMessageHandler.this, e);
             }
+            catch (CMSIdentifierMismatchException e)
+            {
+                callbacks.onFailedDeserialize(size, header, e);
+                noSpamLogger.info("{} is a member of a different CMS group, and should not be tried. Forcing connection close.", header.from);
+                // Sharable bytes will be released by the frame decoder
+                channel.close();
+                MessagingService.instance().closeOutbound(header.from);
+            }
             catch (Throwable t)
             {
                 JVMStabilityInspector.inspectThrowable(t);
@@ -405,24 +421,24 @@ public class InboundMessageHandler extends AbstractMessageHandler
     {
         /**
          * Actually handle the message. Runs on the appropriate {@link Stage} for the {@link Verb}.
-         *
+         * <p>
          * Small messages will come pre-deserialized. Large messages will be deserialized on the stage,
          * just in time, and only then processed.
          */
         public void run()
         {
             Header header = header();
-            long currentTimeNanos = approxTime.now();
-            boolean expired = approxTime.isAfter(currentTimeNanos, header.expiresAtNanos);
+            long approxStartTimeNanos = approxTime.now();
+            boolean expired = approxTime.isAfter(approxStartTimeNanos, header.expiresAtNanos);
 
             boolean processed = false;
             try
             {
-                callbacks.onExecuting(size(), header, currentTimeNanos - header.createdAtNanos, NANOSECONDS);
+                callbacks.onExecuting(size(), header, approxStartTimeNanos - header.createdAtNanos, NANOSECONDS);
 
                 if (expired)
                 {
-                    callbacks.onExpired(size(), header, currentTimeNanos - header.createdAtNanos, NANOSECONDS);
+                    callbacks.onExpired(size(), header, approxStartTimeNanos - header.createdAtNanos, NANOSECONDS);
                     return;
                 }
 
@@ -443,7 +459,7 @@ public class InboundMessageHandler extends AbstractMessageHandler
 
                 releaseResources();
 
-                callbacks.onExecuted(size(), header, approxTime.now() - currentTimeNanos, NANOSECONDS);
+                callbacks.onExecuted(size(), header, approxTime.now() - approxStartTimeNanos, NANOSECONDS);
             }
         }
 

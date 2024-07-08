@@ -37,7 +37,7 @@
   <scm>
     <connection>scm:https://gitbox.apache.org/repos/asf/cassandra.git</connection>
     <developerConnection>scm:https://gitbox.apache.org/repos/asf/cassandra.git</developerConnection>
-    <url>https://gitbox.apache.org/repos/asf?p=cassandra.git;a=tree</url>
+    <url>https://gitbox.apache.org/repos/asf?p=cassandra.git</url>
   </scm>
   <dependencies>
     <dependency>
@@ -158,10 +158,6 @@
       <artifactId>jamm</artifactId>
     </dependency>
     <dependency>
-      <groupId>org.bouncycastle</groupId>
-      <artifactId>bcpkix-jdk18on</artifactId>
-    </dependency>
-    <dependency>
       <groupId>io.netty</groupId>
       <artifactId>netty-all</artifactId>
     </dependency>
@@ -244,8 +240,8 @@
     <!-- end of chronicle-queue -->
 
     <dependency>
-      <groupId>org.fusesource</groupId>
-      <artifactId>sigar</artifactId>
+      <groupId>com.github.oshi</groupId>
+      <artifactId>oshi-core</artifactId>
     </dependency>
     <dependency>
       <groupId>org.eclipse.jdt</groupId>

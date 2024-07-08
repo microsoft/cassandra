@@ -133,8 +133,7 @@ public class TrieMemoryIndex extends MemoryIndex
      */
     public KeyRangeIterator search(QueryContext queryContext, Expression expression, AbstractBounds<PartitionPosition> keyRange)
     {
-        if (logger.isTraceEnabled())
-            logger.trace("Searching memtable index on expression '{}'...", expression);
+        logger.trace("Searching memtable index on expression '{}'...", expression);
 
         switch (expression.getIndexOperator())
         {
@@ -204,7 +203,7 @@ public class TrieMemoryIndex extends MemoryIndex
 
     private void addTerm(PrimaryKey primaryKey, ByteBuffer term)
     {
-        if (index.validateMaxTermSize(primaryKey.partitionKey(), term, false))
+        if (index.validateTermSize(primaryKey.partitionKey(), term, false, null))
         {
             setMinMaxTerm(term.duplicate());
 

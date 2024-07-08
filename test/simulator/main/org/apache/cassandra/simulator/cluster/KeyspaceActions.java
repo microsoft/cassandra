@@ -215,14 +215,14 @@ public class KeyspaceActions extends ClusterActions
         {
             int primaryKey = primaryKeys[i];
             LongToken token = new Murmur3Partitioner().getToken(Int32Type.instance.decompose(primaryKey));
-            List<TokenPlacementModel.Node> readReplicas = readPlacements.replicasFor(token.token);
-            List<TokenPlacementModel.Node> writeReplicas = writePlacements.replicasFor(token.token);
+            List<TokenPlacementModel.Replica> readReplicas = readPlacements.replicasFor(token.token);
+            List<TokenPlacementModel.Replica> writeReplicas = writePlacements.replicasFor(token.token);
 
-            replicasForKey[i] = readReplicas.stream().mapToInt(TokenPlacementModel.Node::idx).toArray();
-            Set<TokenPlacementModel.Node> pendingReplicas = new HashSet<>(writeReplicas);
+            replicasForKey[i] = readReplicas.stream().mapToInt(r -> r.node().idx()).toArray();
+            Set<TokenPlacementModel.Replica> pendingReplicas = new HashSet<>(writeReplicas);
             pendingReplicas.removeAll(readReplicas);
-            replicasForKey[i] = readReplicas.stream().mapToInt(TokenPlacementModel.Node::idx).toArray();
-            pendingReplicasForKey[i] = pendingReplicas.stream().mapToInt(TokenPlacementModel.Node::idx).toArray();
+            replicasForKey[i] = readReplicas.stream().mapToInt(r -> r.node().idx()).toArray();
+            pendingReplicasForKey[i] = pendingReplicas.stream().mapToInt(r -> r.node().idx()).toArray();
         }
 
         int[] membersOfRing = joined.toArray();
@@ -428,8 +428,8 @@ public class KeyspaceActions extends ClusterActions
         public TokenPlacementModel.Lookup forceToken(int tokenIdx, long token)
         {
             SimulationLookup newLookup = new SimulationLookup();
-            newLookup.overrides.putAll(overrides);
-            newLookup.overrides.put(tokenIdx, token);
+            newLookup.tokenOverrides.putAll(tokenOverrides);
+            newLookup.tokenOverrides.put(tokenIdx, token);
             return newLookup;
         }
     }

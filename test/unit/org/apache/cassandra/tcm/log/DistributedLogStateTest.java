@@ -21,8 +21,6 @@ package org.apache.cassandra.tcm.log;
 import java.io.IOException;
 
 import org.junit.BeforeClass;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
 
 import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -35,21 +33,17 @@ import org.apache.cassandra.schema.DistributedMetadataLogKeyspace;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.tcm.Epoch;
 import org.apache.cassandra.tcm.MetadataSnapshots;
-import org.apache.cassandra.tcm.Period;
-import org.apache.cassandra.tcm.Sealed;
 import org.apache.cassandra.tcm.transformations.CustomTransformation;
-import org.apache.cassandra.tcm.transformations.SealPeriod;
+import org.apache.cassandra.tcm.transformations.TriggerSnapshot;
 
 import static org.apache.cassandra.cql3.QueryProcessor.executeInternal;
 import static org.apache.cassandra.db.ColumnFamilyStore.FlushReason.UNIT_TESTS;
 import static org.apache.cassandra.db.SystemKeyspace.METADATA_LOG;
-import static org.apache.cassandra.db.SystemKeyspace.SEALED_PERIODS_TABLE_NAME;
 import static org.apache.cassandra.schema.DistributedMetadataLogKeyspace.TABLE_NAME;
 import static org.apache.cassandra.schema.SchemaConstants.METADATA_KEYSPACE_NAME;
 import static org.apache.cassandra.schema.SchemaConstants.SYSTEM_KEYSPACE_NAME;
 import static org.junit.Assert.assertTrue;
 
-@RunWith(Parameterized.class)
 public class DistributedLogStateTest extends LogStateTestBase
 {
     @BeforeClass
@@ -62,12 +56,6 @@ public class DistributedLogStateTest extends LogStateTestBase
         ServerTestUtils.initCMS();
     }
 
-    public DistributedLogStateTest(boolean truncateIndexTable, boolean truncateInMemoryIndex)
-    {
-        this.truncateIndexTable = truncateIndexTable;
-        this.truncateInMemoryIndex = truncateInMemoryIndex;
-    }
-
     @Override
     LogStateSUT getSystemUnderTest(MetadataSnapshots snapshots)
     {
@@ -77,50 +65,37 @@ public class DistributedLogStateTest extends LogStateTestBase
             // start test entries at FIRST + 1 as the pre-init transform is automatically inserted with Epoch.FIRST
             Epoch currentEpoch = Epoch.FIRST;
             Epoch nextEpoch;
-            long period = Period.FIRST;
-            long nextPeriod = period;
             boolean applied;
+            final LogReader reader = new DistributedMetadataLogKeyspace.DistributedTableLogReader(ConsistencyLevel.SERIAL, () -> snapshots);
 
             @Override
-            public void cleanup() throws IOException
+            public void cleanup()
             {
                 ColumnFamilyStore.getIfExists(SYSTEM_KEYSPACE_NAME, METADATA_LOG).truncateBlockingWithoutSnapshot();
-                ColumnFamilyStore.getIfExists(SYSTEM_KEYSPACE_NAME, SEALED_PERIODS_TABLE_NAME).truncateBlockingWithoutSnapshot();
                 ColumnFamilyStore.getIfExists(METADATA_KEYSPACE_NAME, TABLE_NAME).truncateBlockingWithoutSnapshot();
-                Sealed.unsafeClearLookup();
             }
 
             @Override
-            public void insertRegularEntry() throws IOException
+            public void insertRegularEntry()
             {
                 nextEpoch = currentEpoch.nextEpoch();
                 boolean applied = DistributedMetadataLogKeyspace.tryCommit(new Entry.Id(currentEpoch.getEpoch()),
                                                                    CustomTransformation.make((int) currentEpoch.getEpoch()),
                                                                    currentEpoch,
-                                                                   nextEpoch,
-                                                                   period,
-                                                                   nextPeriod,
-                                                                   false);
+                                                                   nextEpoch);
                 assertTrue(applied);
                 currentEpoch = nextEpoch;
-                period = nextPeriod;
             }
 
             @Override
-            public void sealPeriod() throws IOException
+            public void snapshotMetadata()
             {
                 nextEpoch = currentEpoch.nextEpoch();
                 applied = DistributedMetadataLogKeyspace.tryCommit(new Entry.Id(currentEpoch.getEpoch()),
-                                                                   SealPeriod.instance,
+                                                                   TriggerSnapshot.instance,
                                                                    currentEpoch,
-                                                                   nextEpoch,
-                                                                   period,
-                                                                   period,
-                                                                   true);
+                                                                   nextEpoch);
                 assertTrue(applied);
-                // after appending a SealPeriod, move to a new partition
-                Sealed.recordSealedPeriod(period, nextEpoch);
-                nextPeriod++;
                 currentEpoch = nextEpoch;
                 // flush log table periodically so queries are served from disk
                 ColumnFamilyStore.getIfExists(DistributedMetadataLogKeyspace.Log.id).forceBlockingFlush(UNIT_TESTS);
@@ -129,27 +104,18 @@ public class DistributedLogStateTest extends LogStateTestBase
             @Override
             public LogState getLogState(Epoch since)
             {
-                return DistributedMetadataLogKeyspace.getLogState(since, new DistributedMetadataLogKeyspace.DistributedTableLogReader(ConsistencyLevel.SERIAL), snapshots);
+                return reader.getLogState(since);
             }
 
             @Override
             public void dumpTables() throws IOException
             {
-                UntypedResultSet r = executeInternal("SELECT period, epoch, entry_id, kind FROM system_cluster_metadata.distributed_metadata_log");
+                UntypedResultSet r = executeInternal("SELECT epoch, entry_id, kind FROM system_cluster_metadata.distributed_metadata_log");
                 r.forEach(row -> {
-                    long p = row.getLong("period");
                     long e = row.getLong("epoch");
                     long i = row.getLong("entry_id");
                     String s = row.getString("kind");
-                    System.out.println(String.format("(%d, %d, %d, %s)", p, e, i, s));
-                });
-
-                String query = String.format("SELECT max_epoch, period FROM SYStem.metadata_sealed_periods");
-                r = executeInternal(query);
-                r.forEach(row -> {
-                    long p = row.getLong("period");
-                    long e = row.getLong("max_epoch");
-                    System.out.println(String.format("(%d, %d)", e, p));
+                    System.out.println(String.format("(%d, %d, %s)", e, i, s));
                 });
             }
         };

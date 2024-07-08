@@ -29,7 +29,6 @@ import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Function;
 import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 import javax.annotation.Nullable;
 
 import io.github.jbellis.jvector.util.Bits;
@@ -78,7 +77,7 @@ public class VectorMemoryIndex extends MemoryIndex
     @Override
     public synchronized long add(DecoratedKey key, Clustering<?> clustering, ByteBuffer value)
     {
-        if (value == null || value.remaining() == 0 || !index.validateMaxTermSize(key, value, false))
+        if (value == null || value.remaining() == 0 || !index.validateTermSize(key, value, false, null))
             return 0;
 
         var primaryKey = index.hasClustering() ? index.keyFactory().create(key, clustering)
@@ -111,7 +110,7 @@ public class VectorMemoryIndex extends MemoryIndex
         }
         else
         {
-            different = IntStream.range(0, oldRemaining).anyMatch(i -> oldValue.get(i) != newValue.get(i));
+            different = index.termType().compare(oldValue, newValue) != 0;
         }
 
         long bytesUsed = 0;

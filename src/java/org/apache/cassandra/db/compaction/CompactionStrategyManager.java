@@ -177,7 +177,7 @@ public class CompactionStrategyManager implements INotificationConsumer
         holders = ImmutableList.of(transientRepairs, pendingRepairs, repaired, unrepaired);
 
         cfs.getTracker().subscribe(this);
-        logger.trace("{} subscribed to the data tracker.", this);
+        logger.trace("Compaction manager for {}.{} subscribed to the data tracker.", cfs.keyspace.getName(), cfs.name);
         this.cfs = cfs;
         this.compactionLogger = new CompactionLogger(cfs, this);
         this.boundariesSupplier = boundariesSupplier;
@@ -437,6 +437,20 @@ public class CompactionStrategyManager implements INotificationConsumer
         try
         {
             return pendingRepairs.hasDataForSession(sessionID) || transientRepairs.hasDataForSession(sessionID);
+        }
+        finally
+        {
+            readLock.unlock();
+        }
+    }
+
+    @VisibleForTesting
+    public boolean hasPendingRepairSSTable(TimeUUID sessionID, SSTableReader sstable)
+    {
+        readLock.lock();
+        try
+        {
+            return pendingRepairs.hasPendingRepairSSTable(sessionID, sstable) || transientRepairs.hasPendingRepairSSTable(sessionID, sstable);
         }
         finally
         {
@@ -750,7 +764,7 @@ public class CompactionStrategyManager implements INotificationConsumer
     private void handleFlushNotification(Iterable<SSTableReader> added)
     {
         for (SSTableReader sstable : added)
-            compactionStrategyFor(sstable).addSSTable(sstable);
+            getHolder(sstable).addSSTable(sstable);
     }
 
     private int getHolderIndex(SSTableReader sstable)
@@ -1325,6 +1339,8 @@ public class CompactionStrategyManager implements INotificationConsumer
       */
     public void mutateRepaired(Collection<SSTableReader> sstables, long repairedAt, TimeUUID pendingRepair, boolean isTransient) throws IOException
     {
+        if (sstables.isEmpty())
+            return;
         Set<SSTableReader> changed = new HashSet<>();
 
         writeLock.lock();

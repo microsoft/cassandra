@@ -18,12 +18,10 @@
 
 package org.apache.cassandra.tcm;
 
-import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 
-import org.apache.cassandra.concurrent.ExecutorFactory;
-import org.apache.cassandra.concurrent.ExecutorPlus;
-import org.apache.cassandra.utils.concurrent.AsyncPromise;
+import org.apache.cassandra.utils.Closeable;
 import org.apache.cassandra.utils.concurrent.Future;
 
 /**
@@ -32,51 +30,66 @@ import org.apache.cassandra.utils.concurrent.Future;
  * comes in, we create a new future. If a request for a newer epoch comes in, we simply
  * swap out the current future reference for a new one which is requesting the newer epoch.
  */
-public class EpochAwareDebounce<T>
+public class EpochAwareDebounce implements Closeable
 {
-    public static final EpochAwareDebounce<ClusterMetadata> instance = new EpochAwareDebounce<>();
+    public static final EpochAwareDebounce instance = new EpochAwareDebounce();
 
-    private final AtomicReference<EpochAwareAsyncPromise<T>> currentFuture = new AtomicReference<>();
-    private final ExecutorPlus executor;
+    private final AtomicReference<EpochAwareFuture> currentFuture = new AtomicReference<>();
 
     private EpochAwareDebounce()
     {
-        // 2 threads since we might start a new debounce for a newer epoch while the old one is executing
-        this.executor = ExecutorFactory.Global.executorFactory().pooled("debounce", 2);
     }
 
-    public Future<T> getAsync(Callable<T> get, Epoch epoch)
+    /**
+     * Deduplicate requests to catch up log state based on the desired epoch. Callers supply a target epoch and
+     * a function obtain the ClusterMetadata that corresponds with it. It is expected that this function will make rpc
+     * calls to peers, retrieving a LogState which can be applied locally to produce the necessary {@code
+     * ClusterMetadata}. 
+     *
+     * @param fetchFunction supplies the future that, when dereferenced, will yield metadata for the desired epoch
+     * @param epoch the desired epoch
+     * @return
+     */
+    public Future<ClusterMetadata> getAsync(Supplier<Future<ClusterMetadata>> fetchFunction, Epoch epoch)
     {
         while (true)
         {
-            EpochAwareAsyncPromise<T> running = currentFuture.get();
-            if (running != null && !running.isDone() && running.epoch.isEqualOrAfter(epoch))
-                return running;
+            EpochAwareFuture running = currentFuture.get();
+            // Someone else is about to install a new future
+            if (running == SENTINEL)
+                continue;
 
-            EpochAwareAsyncPromise<T> promise = new EpochAwareAsyncPromise<>(epoch);
-            if (currentFuture.compareAndSet(running, promise))
+            if (running != null && !running.future.isDone() && running.epoch.isEqualOrAfter(epoch))
+                return running.future;
+
+            if (currentFuture.compareAndSet(running, SENTINEL))
             {
-                executor.submit(() -> {
-                    try
-                    {
-                        promise.setSuccess(get.call());
-                    }
-                    catch (Throwable t)
-                    {
-                        promise.setFailure(t);
-                    }
-                });
-                return promise;
+                EpochAwareFuture promise = new EpochAwareFuture(epoch, fetchFunction.get());
+                boolean res = currentFuture.compareAndSet(SENTINEL, promise);
+                assert res : "Should not have happened";
+                return promise.future;
             }
         }
     }
 
-    private static class EpochAwareAsyncPromise<T> extends AsyncPromise<T>
+    private static final EpochAwareFuture SENTINEL = new EpochAwareFuture(Epoch.EMPTY, null);
+
+    @Override
+    public void close()
+    {
+        EpochAwareFuture future = currentFuture.get();
+        if (future != null && future != SENTINEL)
+            future.future.cancel(true);
+    }
+
+    private static class EpochAwareFuture
     {
         private final Epoch epoch;
-        public EpochAwareAsyncPromise(Epoch epoch)
+        private final Future<ClusterMetadata> future;
+        public EpochAwareFuture(Epoch epoch, Future<ClusterMetadata> future)
         {
             this.epoch = epoch;
+            this.future = future;
         }
     }
 }

@@ -18,7 +18,6 @@
 
 package org.apache.cassandra.tcm;
 
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collections;
@@ -99,7 +98,7 @@ public class BootWithMetadataTest
             epoch = doTest(Epoch.create(epoch.getEpoch() + 100), first);
     }
 
-    private Epoch doTest(Epoch epoch, ClusterMetadata first) throws IOException
+    private Epoch doTest(Epoch epoch, ClusterMetadata first) throws Throwable
     {
         long seed = System.nanoTime();
         logger.info("STARTING TEST FROM EPOCH {}, SEED: {}", epoch, seed);
@@ -136,7 +135,7 @@ public class BootWithMetadataTest
         seq = addSequence(seq, move(partitioner, random, seq::contains));
         seq = addSequence(seq, addToCMS(random, seq::contains));
         t = t.with(seq);
-        ClusterMetadata toWrite = t.build().metadata.forceEpoch(epoch).forcePeriod(999);
+        ClusterMetadata toWrite = t.build().metadata.forceEpoch(epoch);
 
         // before exporting to file, make the local node the single CMS member in the CM instance
         // as CMS membership is a requirement for re-initialising from file

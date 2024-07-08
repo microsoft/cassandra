@@ -57,6 +57,7 @@ import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.service.DataResurrectionCheck.Heartbeat;
 import org.apache.cassandra.utils.Clock;
 import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.SystemInfo;
 
 import static java.util.Collections.singletonList;
 import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_INVALID_LEGACY_SSTABLE_ROOT;
@@ -243,6 +244,7 @@ public class StartupChecksTest
     public void testKernelBug1057843Check() throws Exception
     {
         Assume.assumeTrue(DatabaseDescriptor.getCommitLogCompression() == null); // we would not be able to enable direct io otherwise
+        Assume.assumeTrue("Skipping this test on non-Linux OS", FBUtilities.isLinux);
         testKernelBug1057843Check("ext4", DiskAccessMode.direct, new Semver("6.1.63.1-generic"), false);
         testKernelBug1057843Check("ext4", DiskAccessMode.direct, new Semver("6.1.64.1-generic"), true);
         testKernelBug1057843Check("ext4", DiskAccessMode.direct, new Semver("6.1.65.1-generic"), true);
@@ -312,14 +314,21 @@ public class StartupChecksTest
 
         String savedCommitLogLocation = DatabaseDescriptor.getCommitLogLocation();
         DiskAccessMode savedCommitLogWriteDiskAccessMode = DatabaseDescriptor.getCommitLogWriteDiskAccessMode();
-        Semver savedKernelVersion = FBUtilities.getKernelVersion();
+        SystemInfo savedSystemInfo = FBUtilities.getSystemInfo();
         try
         {
             DatabaseDescriptor.setCommitLogLocation(commitLogLocation);
             DatabaseDescriptor.setCommitLogWriteDiskAccessMode(diskAccessMode);
             DatabaseDescriptor.initializeCommitLogDiskAccessMode();
             assertThat(DatabaseDescriptor.getCommitLogWriteDiskAccessMode()).isEqualTo(diskAccessMode);
-            FBUtilities.setKernelVersionSupplier(() -> kernelVersion);
+            FBUtilities.setSystemInfoSupplier(() -> new SystemInfo()
+            {
+                @Override
+                public Semver getKernelVersion()
+                {
+                    return kernelVersion;
+                }
+            });
             withPathOverriddingFileSystem(Map.of(commitLogLocation, fsType), () -> {
                 if (expectToFail)
                     assertThatExceptionOfType(StartupException.class).isThrownBy(() -> StartupChecks.checkKernelBug1057843.execute(options));
@@ -333,7 +342,7 @@ public class StartupChecksTest
             DatabaseDescriptor.setCommitLogLocation(savedCommitLogLocation);
             DatabaseDescriptor.setCommitLogWriteDiskAccessMode(savedCommitLogWriteDiskAccessMode);
             DatabaseDescriptor.initializeCommitLogDiskAccessMode();
-            FBUtilities.setKernelVersionSupplier(() -> savedKernelVersion);
+            FBUtilities.setSystemInfoSupplier(() -> savedSystemInfo);
         }
     }
 

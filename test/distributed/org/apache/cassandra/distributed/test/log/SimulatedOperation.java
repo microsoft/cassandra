@@ -110,6 +110,7 @@ public abstract class SimulatedOperation
 
     public static ModelState replace(CMSSut sut, ModelState state, Node toReplace, Node replacement)
     {
+        assert toReplace.tokenIdx() == replacement.tokenIdx();
         ModelState.Transformer transformer = state.transformer();
         new Replace(toReplace, replacement).create(sut, state.simulatedPlacements, transformer);
         return transformer.transform();
@@ -155,8 +156,8 @@ public abstract class SimulatedOperation
         sutActions.next();
         ClusterMetadata m2 = ClusterMetadata.current();
 
-        Map<Range<Token>, VersionedEndpoints.ForRange> after = m2.placements.get(simulatedState.rf.asKeyspaceParams().replication).reads.replicaGroups();
-        m1.placements.get(simulatedState.rf.asKeyspaceParams().replication).reads.replicaGroups().forEach((k, beforePlacements) -> {
+        Map<Range<Token>, VersionedEndpoints.ForRange> after = m2.placements.get(simulatedState.rf.asKeyspaceParams().replication).reads.asMap();
+        m1.placements.get(simulatedState.rf.asKeyspaceParams().replication).reads.forEach((k, beforePlacements) -> {
             if (after.containsKey(k))
             {
                 VersionedEndpoints.ForRange afterPlacements = after.get(k);

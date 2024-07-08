@@ -25,6 +25,7 @@
 #
 ################################
 
+[ $DEBUG ] && set -x
 
 # help
 if [ "$#" -lt 1 ] || [ "$#" -gt 2 ] || [ "$1" == "-h" ]; then
@@ -74,7 +75,7 @@ if [ "${java_version}" -eq 17 ] && [[ "${target}" == "dtest-upgrade" ]] ; then
 fi
 
 python_version=$(python -V 2>&1 | awk '{print $2}' | awk -F'.' '{print $1"."$2}')
-python_regx_supported_versions="^(3.7|3.8|3.11)$"
+python_regx_supported_versions="^(3.8|3.9|3.10|3.11)$"
 [[ $python_version =~ $python_regx_supported_versions ]] || { echo "Python ${python_version} not supported."; exit 1; }
 
 # check project is already built. no cleaning is done, so jenkins unstash works, beware.
@@ -117,8 +118,8 @@ if [ "${DTEST_TARGET}" = "dtest" ]; then
     DTEST_ARGS="--use-vnodes --num-tokens=${NUM_TOKENS} --skip-resource-intensive-tests"
 elif [ "${DTEST_TARGET}" = "dtest-novnode" ]; then
     DTEST_ARGS="--skip-resource-intensive-tests --keep-failed-test-dir"
-elif [ "${DTEST_TARGET}" = "dtest-offheap" ]; then
-    DTEST_ARGS="--use-vnodes --num-tokens=${NUM_TOKENS} --use-off-heap-memtables --skip-resource-intensive-tests"
+elif [ "${DTEST_TARGET}" = "dtest-latest" ]; then
+    DTEST_ARGS="--use-vnodes --num-tokens=${NUM_TOKENS} --configuration-yaml=cassandra_latest.yaml --skip-resource-intensive-tests"
 elif [ "${DTEST_TARGET}" = "dtest-large" ]; then
     DTEST_ARGS="--use-vnodes --num-tokens=${NUM_TOKENS} --only-resource-intensive-tests --force-resource-intensive-tests"
 elif [ "${DTEST_TARGET}" = "dtest-large-novnode" ]; then
@@ -145,6 +146,7 @@ if [[ "${DTEST_SPLIT_CHUNK}" =~ ^[0-9]+/[0-9]+$ ]]; then
     ( split --help 2>&1 ) | grep -q "r/K/N" || split_cmd=gsplit
     command -v ${split_cmd} >/dev/null 2>&1 || { echo >&2 "${split_cmd} needs to be installed"; exit 1; }
     SPLIT_TESTS=$(${split_cmd} -n r/${DTEST_SPLIT_CHUNK} ${DIST_DIR}/test_list.txt)
+    SPLIT_STRING="_${DTEST_SPLIT_CHUNK//\//_}"
 elif [[ "x" != "x${DTEST_SPLIT_CHUNK}" ]] ; then
     SPLIT_TESTS=$(grep -e "${DTEST_SPLIT_CHUNK}" ${DIST_DIR}/test_list.txt)
     [[ "x" != "x${SPLIT_TESTS}" ]] || { echo "no tests match regexp \"${DTEST_SPLIT_CHUNK}\""; exit 1; }
@@ -152,9 +154,10 @@ else
     SPLIT_TESTS=$(cat ${DIST_DIR}/test_list.txt)
 fi
 
+pytest_results_file="${DIST_DIR}/test/output/nosetests.xml"
+pytest_opts="-vv --log-cli-level=DEBUG --junit-xml=${pytest_results_file} --junit-prefix=${DTEST_TARGET} -s"
 
-PYTEST_OPTS="-vv --log-cli-level=DEBUG --junit-xml=${DIST_DIR}/test/output/nosetests.xml --junit-prefix=${DTEST_TARGET} -s"
-pytest ${PYTEST_OPTS} --cassandra-dir=${CASSANDRA_DIR} --keep-failed-test-dir ${DTEST_ARGS} ${SPLIT_TESTS} 2>&1 | tee -a ${DIST_DIR}/test_stdout.txt
+pytest ${pytest_opts} --cassandra-dir=${CASSANDRA_DIR} --keep-failed-test-dir ${DTEST_ARGS} ${SPLIT_TESTS} 2>&1 | tee -a ${DIST_DIR}/test_stdout.txt
 
 # tar up any ccm logs for easy retrieval
 if ls ${TMPDIR}/*/test/*/logs/* &>/dev/null ; then
@@ -164,10 +167,13 @@ fi
 
 # merge all unit xml files into one, and print summary test numbers
 pushd ${CASSANDRA_DIR}/ >/dev/null
-# remove <testsuites> wrapping elements. `ant generate-unified-test-report` doesn't like it`
-sed -r "s/<[\/]?testsuites>//g" ${DIST_DIR}/test/output/nosetests.xml > ${TMPDIR}/nosetests.xml
-cat ${TMPDIR}/nosetests.xml > ${DIST_DIR}/test/output/nosetests.xml
-ant -quiet -silent generate-unified-test-report
+# remove <testsuites> wrapping elements. ant generate-test-report` doesn't like it, and update testsuite name
+sed -r "s/<[\/]?testsuites>//g" ${pytest_results_file} > ${TMPDIR}/nosetests.xml
+cat ${TMPDIR}/nosetests.xml > ${pytest_results_file}
+sed "s/testsuite name=\"Cassandra dtests\"/testsuite name=\"${DTEST_TARGET}_jdk${java_version}_python${python_version}_cython${cython}_$(uname -m)${SPLIT_STRING}\"/g" ${pytest_results_file} > ${TMPDIR}/nosetests.xml
+cat ${TMPDIR}/nosetests.xml > ${pytest_results_file}
+
+ant -quiet -silent generate-test-report
 popd  >/dev/null
 
 ################################

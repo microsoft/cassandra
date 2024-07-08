@@ -62,6 +62,7 @@ import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.concurrent.Future;
 import org.apache.cassandra.utils.vint.VIntCoding;
 
+import static com.google.common.collect.ImmutableList.of;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.apache.cassandra.tcm.Transformation.Kind.FINISH_JOIN;
 import static org.apache.cassandra.tcm.Transformation.Kind.MID_JOIN;
@@ -169,6 +170,12 @@ public class BootstrapAndJoin extends MultiStepOperation<Epoch>
     }
 
     @Override
+    public Transformation.Result applyTo(ClusterMetadata metadata)
+    {
+        return applyMultipleTransformations(metadata, next, of(startJoin, midJoin, finishJoin));
+    }
+
+    @Override
     public SequenceState executeNext()
     {
         switch (next)
@@ -254,10 +261,11 @@ public class BootstrapAndJoin extends MultiStepOperation<Epoch>
 
                 break;
             case FINISH_JOIN:
+                ClusterMetadata metadata;
                 try
                 {
                     SystemKeyspace.setBootstrapState(SystemKeyspace.BootstrapState.COMPLETED);
-                    ClusterMetadataService.instance().commit(finishJoin);
+                    metadata = ClusterMetadataService.instance().commit(finishJoin);
                     StorageService.instance.clearTransientMode();
                 }
                 catch (Throwable e)
@@ -266,6 +274,7 @@ public class BootstrapAndJoin extends MultiStepOperation<Epoch>
                     logger.warn("Exception committing finishJoin", e);
                     return continuable();
                 }
+                ClusterMetadataService.instance().ensureCMSPlacement(metadata);
                 break;
             default:
                 return error(new IllegalStateException("Can't proceed with join from " + next));

@@ -33,6 +33,8 @@ import java.util.Collection;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeoutException;
 
+import com.google.common.base.Charsets;
+
 import org.apache.cassandra.auth.jmx.AuthorizationProxy;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CIDR;
@@ -57,8 +59,11 @@ import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.transport.messages.ResultMessage;
 
 import static java.lang.String.format;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.apache.cassandra.auth.AuthKeyspace.CIDR_GROUPS;
 import static org.apache.cassandra.schema.SchemaConstants.AUTH_KEYSPACE_NAME;
+import static org.awaitility.Awaitility.await;
 import static org.junit.Assert.assertNotNull;
 
 
@@ -239,6 +244,27 @@ public class AuthTestUtils
         }
     }
 
+    public static class LocalMutualTlsWithPasswordFallbackAuthenticator extends MutualTlsWithPasswordFallbackAuthenticator
+    {
+
+        public LocalMutualTlsWithPasswordFallbackAuthenticator(Map<String, String> parameters)
+        {
+            super(parameters);
+        }
+
+        @Override
+        ResultMessage.Rows select(SelectStatement statement, QueryOptions options)
+        {
+            return statement.executeLocally(QueryState.forInternalCalls(), options);
+        }
+
+        @Override
+        UntypedResultSet process(String query, ConsistencyLevel cl)
+        {
+            return QueryProcessor.executeInternal(query);
+        }
+    }
+
     public static class NoAuthSetupAuthorizationProxy extends AuthorizationProxy
     {
         public NoAuthSetupAuthorizationProxy()
@@ -364,8 +390,49 @@ public class AuthTestUtils
 
     public static void initializeIdentityRolesTable(final String identity) throws IOException, TimeoutException
     {
+        truncateIdentityRolesTable();
+        addIdentityToRole(identity, "readonly_user");
+    }
+
+    public static void truncateIdentityRolesTable() throws IOException, TimeoutException
+    {
         StorageService.instance.truncate(SchemaConstants.AUTH_KEYSPACE_NAME, AuthKeyspace.IDENTITY_TO_ROLES);
-        String insertQuery = "Insert into %s.%s (identity, role) values ('%s', 'readonly_user');";
-        QueryProcessor.process(String.format(insertQuery, SchemaConstants.AUTH_KEYSPACE_NAME, AuthKeyspace.IDENTITY_TO_ROLES, identity), ConsistencyLevel.ONE);
+    }
+
+    public static void addIdentityToRole(final String identity, final String role)
+    {
+        String insertQuery = "INSERT INTO %s.%s (identity, role) VALUES ('%s', '%s');";
+        QueryProcessor.process(String.format(insertQuery, SchemaConstants.AUTH_KEYSPACE_NAME, AuthKeyspace.IDENTITY_TO_ROLES, identity, role), ConsistencyLevel.ONE);
+    }
+
+    /**
+     * Convenience method for producing a username:password token expected by {@link PasswordAuthenticator}
+     * @param username user to encode
+     * @param password password to encode
+     * @return Byte array formatted as 0-byte, username, 0-byte, password
+     */
+    public static byte[] getToken(String username, String password)
+    {
+        byte[] usernameBytes = username.getBytes(Charsets.UTF_8);
+        byte[] passwordBytes = password.getBytes(Charsets.UTF_8);
+        // Format of the token sent is 0-byte, username, 0-bytes, password
+        byte[] token = new byte[usernameBytes.length + passwordBytes.length + 2];
+        token[0] = 0;
+        System.arraycopy(usernameBytes, 0, token, 1, usernameBytes.length);
+        token[usernameBytes.length + 1] = 0;
+        System.arraycopy(passwordBytes, 0, token, usernameBytes.length + 2, passwordBytes.length);
+        return token;
+    }
+
+    /**
+     * Block on waiting for existence of the initial superuser roles.  This should be used by all tests that
+     * rely on existence of these users.
+     */
+    public static void waitForExistingRoles()
+    {
+        await().pollDelay(0, MILLISECONDS)
+               .pollInterval(250, MILLISECONDS)
+               .atMost(10, SECONDS)
+               .until(CassandraRoleManager::hasExistingRoles);
     }
 }

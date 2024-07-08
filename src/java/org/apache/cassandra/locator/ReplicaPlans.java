@@ -142,10 +142,8 @@ public class ReplicaPlans
                 if (!localLive.hasAtleast(blockFor, blockForFullReplicas))
                 {
                     if (logger.isTraceEnabled())
-                    {
-                        logger.trace(String.format("Local replicas %s are insufficient to satisfy LOCAL_QUORUM requirement of %d live replicas and %d full replicas in '%s'",
-                                                   allLive.filter(InOurDc.replicas()), blockFor, blockForFullReplicas, DatabaseDescriptor.getLocalDataCenter()));
-                    }
+                        logger.trace("Local replicas {} are insufficient to satisfy LOCAL_QUORUM requirement of {} live replicas and {} full replicas in '{}'",
+                                     allLive.filter(InOurDc.replicas()), blockFor, blockForFullReplicas, DatabaseDescriptor.getLocalDataCenter());
                     throw UnavailableException.create(consistencyLevel, blockFor, blockForFullReplicas, localLive.allReplicas(), localLive.fullReplicas());
                 }
                 break;
@@ -556,6 +554,7 @@ public class ReplicaPlans
     {
         return new Selector()
         {
+
             @Override
             public <E extends Endpoints<E>, L extends ReplicaLayout.ForWrite<E>>
             E select(ConsistencyLevel consistencyLevel, L liveAndDown, L live)
@@ -572,7 +571,8 @@ public class ReplicaPlans
                     int add = consistencyLevel.blockForWrite(liveAndDown.replicationStrategy(), liveAndDown.pending()) - contacts.size();
                     if (add > 0)
                     {
-                        for (Replica replica : filter(live.all(), r -> !contacts.contains(r)))
+                        E all = consistencyLevel.isDatacenterLocal() ? live.all().filter(InOurDc.replicas()) : live.all();
+                        for (Replica replica : filter(all, r -> !contacts.contains(r)))
                         {
                             contacts.add(replica);
                             if (--add == 0)

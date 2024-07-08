@@ -260,6 +260,7 @@ public class Gossiper implements IFailureDetectionEventListener, GossiperMBean, 
                 {
                     GossipDigestSyn digestSynMessage = new GossipDigestSyn(getClusterName(),
                                                                            getPartitionerName(),
+                                                                           ClusterMetadata.current().metadataIdentifier,
                                                                            gDigests);
                     Message<GossipDigestSyn> message = Message.out(GOSSIP_DIGEST_SYN, digestSynMessage);
                     /* Gossip to some random live member */
@@ -565,6 +566,7 @@ public class Gossiper implements IFailureDetectionEventListener, GossiperMBean, 
         VersionedValue shutdown = remoteState.getApplicationState(ApplicationState.STATUS_WITH_PORT);
         if (shutdown == null)
             throw new AssertionError("Remote shutdown sent but missing STATUS_WITH_PORT; " + remoteState);
+        remoteState.getHeartBeatState().forceHighestPossibleVersionUnsafe();
         endpointStateMap.put(endpoint, remoteState);
         markDead(endpoint, remoteState);
         FailureDetector.instance.forceConviction(endpoint);
@@ -761,8 +763,7 @@ public class Gossiper implements IFailureDetectionEventListener, GossiperMBean, 
         /* Generate a random number from 0 -> size */
         int index = (size == 1) ? 0 : random.nextInt(size);
         InetAddressAndPort to = endpoints.get(index);
-        if (logger.isTraceEnabled())
-            logger.trace("Sending a GossipDigestSyn to {} ...", to);
+        logger.trace("Sending a GossipDigestSyn to {} ...", to);
         if (firstSynSendAt == 0)
             firstSynSendAt = nanoTime();
         MessagingService.instance().send(message, to);
@@ -865,8 +866,7 @@ public class Gossiper implements IFailureDetectionEventListener, GossiperMBean, 
     @VisibleForTesting
     void doStatusCheck()
     {
-        if (logger.isTraceEnabled())
-            logger.trace("Performing status check ...");
+        logger.trace("Performing status check ...");
 
         long now = currentTimeMillis();
         long nowNano = nanoTime();
@@ -1045,8 +1045,7 @@ public class Gossiper implements IFailureDetectionEventListener, GossiperMBean, 
                         reqdEndpointState = new EndpointState(new HeartBeatState(localHbGeneration, localHbVersion));
                     }
                     final ApplicationState key = entry.getKey();
-                    if (logger.isTraceEnabled())
-                        logger.trace("Adding state {}: {}" , key, value.value);
+                    logger.trace("Adding state {}: {}" , key, value.value);
 
                     states.put(key, value);
                 }
@@ -1057,6 +1056,7 @@ public class Gossiper implements IFailureDetectionEventListener, GossiperMBean, 
         return reqdEndpointState;
     }
 
+    @Override
     public void notifyFailureDetector(Map<InetAddressAndPort, EndpointState> remoteEpStateMap)
     {
         for (Entry<InetAddressAndPort, EndpointState> entry : remoteEpStateMap.entrySet())
@@ -1129,8 +1129,7 @@ public class Gossiper implements IFailureDetectionEventListener, GossiperMBean, 
     public void realMarkAlive(final InetAddressAndPort addr, final EndpointState localState)
     {
         checkProperThreadForStateMutation();
-        if (logger.isTraceEnabled())
-            logger.trace("marking as alive {}", addr);
+        logger.trace("marking as alive {}", addr);
         localState.markAlive();
         localState.updateTimestamp(); // prevents doStatusCheck from racing us and evicting if it was down > aVeryLongTime
         liveEndpoints.add(addr);
@@ -1140,8 +1139,8 @@ public class Gossiper implements IFailureDetectionEventListener, GossiperMBean, 
         logger.info("InetAddress {} is now UP", addr);
         for (IEndpointStateChangeSubscriber subscriber : subscribers)
             subscriber.onAlive(addr, localState);
-        if (logger.isTraceEnabled())
-            logger.trace("Notified {}", subscribers);
+
+        logger.trace("Notified {}", subscribers);
 
         GossiperDiagnostics.realMarkedAlive(this, addr, localState);
     }
@@ -1150,8 +1149,7 @@ public class Gossiper implements IFailureDetectionEventListener, GossiperMBean, 
     public void markDead(InetAddressAndPort addr, EndpointState localState)
     {
         checkProperThreadForStateMutation();
-        if (logger.isTraceEnabled())
-            logger.trace("marking as down {}", addr);
+        logger.trace("marking as down {}", addr);
         silentlyMarkDead(addr, localState);
         logger.info("InetAddress {} is now DOWN", addr);
 
@@ -1160,8 +1158,8 @@ public class Gossiper implements IFailureDetectionEventListener, GossiperMBean, 
             return;
         for (IEndpointStateChangeSubscriber subscriber : subscribers)
             subscriber.onDead(addr, localState);
-        if (logger.isTraceEnabled())
-            logger.trace("Notified {}", subscribers);
+
+        logger.trace("Notified {}", subscribers);
 
         GossiperDiagnostics.markedDead(this, addr, localState);
     }
@@ -1200,8 +1198,8 @@ public class Gossiper implements IFailureDetectionEventListener, GossiperMBean, 
             else
                 logger.info("Node {} is now part of the cluster", ep);
         }
-        if (logger.isTraceEnabled())
-            logger.trace("Adding endpoint state for {}", ep);
+
+        logger.trace("Adding endpoint state for {}", ep);
         endpointStateMap.put(ep, epState);
 
         if (localEpState != null)
@@ -1342,6 +1340,7 @@ public class Gossiper implements IFailureDetectionEventListener, GossiperMBean, 
     }
 
     @VisibleForTesting
+    @Override
     public void applyStateLocally(Map<InetAddressAndPort, EndpointState> epStateMap)
     {
         checkProperThreadForStateMutation();
@@ -1350,10 +1349,10 @@ public class Gossiper implements IFailureDetectionEventListener, GossiperMBean, 
             InetAddressAndPort ep = entry.getKey();
             if (ep.equals(getBroadcastAddressAndPort()))
                 continue;
+
             if (justRemovedEndpoints.containsKey(ep))
             {
-                if (logger.isTraceEnabled())
-                    logger.trace("Ignoring gossip for {} because it is quarantined", ep);
+                logger.trace("Ignoring gossip for {} because it is quarantined", ep);
                 continue;
             }
 
@@ -1404,8 +1403,7 @@ public class Gossiper implements IFailureDetectionEventListener, GossiperMBean, 
                 }
                 else
                 {
-                    if (logger.isTraceEnabled())
-                        logger.trace("Ignoring remote generation {} < {}", remoteGeneration, localGeneration);
+                    logger.trace("Ignoring remote generation {} < {}", remoteGeneration, localGeneration);
                 }
             }
             else
@@ -2220,6 +2218,7 @@ public class Gossiper implements IFailureDetectionEventListener, GossiperMBean, 
             Gossiper.instance.makeGossipDigest(gDigests);
             GossipDigestSyn digestSynMessage = new GossipDigestSyn(getClusterName(),
                                                                    getPartitionerName(),
+                                                                   ClusterMetadata.current().metadataIdentifier,
                                                                    gDigests);
             Message<GossipDigestSyn> message = Message.out(GOSSIP_DIGEST_SYN, digestSynMessage);
             sendGossip(message, cms);

@@ -49,6 +49,7 @@ import org.apache.cassandra.tcm.log.LogState;
 import org.apache.cassandra.utils.AbstractIterator;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.concurrent.AsyncPromise;
+import org.apache.cassandra.utils.concurrent.Future;
 import org.apache.cassandra.utils.concurrent.Promise;
 
 import static org.apache.cassandra.exceptions.ExceptionCode.SERVER_ERROR;
@@ -78,20 +79,26 @@ public final class RemoteProcessor implements Processor
                                                     new CandidateIterator(candidates(false)),
                                                     retryPolicy);
 
+            log.append(result.logState());
+
             if (result.isSuccess())
             {
                 Commit.Result.Success success = result.success();
-                log.append(success.replication.entries());
                 log.awaitAtLeast(success.epoch);
+            }
+            else
+            {
+                log.waitForHighestConsecutive();
             }
 
             return result;
         }
         catch (Exception e)
         {
-            return new Commit.Result.Failure(SERVER_ERROR, e.getMessage() == null
-                                                           ? e.getClass().toString()
-                                                           : e.getMessage(), false);
+            return Commit.Result.failed(SERVER_ERROR,
+                                        e.getMessage() == null
+                                        ? e.getClass().toString()
+                                        : e.getMessage());
         }
     }
 
@@ -118,13 +125,18 @@ public final class RemoteProcessor implements Processor
     @Override
     public ClusterMetadata fetchLogAndWait(Epoch waitFor, Retry.Deadline retryPolicy)
     {
-        // Synchonous, non-debounced call if we are waiting for the highest epoch. Should be used sparingly.
+        // Synchonous, non-debounced call if we are waiting for the highest epoch (without knowing/caring what it is).
+        // Should be used sparingly.
         if (waitFor == null)
-            return fetchLogAndWaitInternal();
+            return fetchLogAndWait(new CandidateIterator(candidates(true), false), log);
 
         try
         {
-            return EpochAwareDebounce.instance.getAsync(this::fetchLogAndWaitInternal, waitFor).get(retryPolicy.remainingNanos(), TimeUnit.NANOSECONDS);
+            Supplier<Future<ClusterMetadata>> fetchFunction = () -> fetchLogAndWaitInternal(new CandidateIterator(candidates(true), false),
+                                                                                            log);
+
+            Future<ClusterMetadata> cmFuture = EpochAwareDebounce.instance.getAsync(fetchFunction, waitFor);
+            return cmFuture.get(retryPolicy.remainingNanos(), TimeUnit.NANOSECONDS);
         }
         catch (InterruptedException e)
         {
@@ -136,28 +148,39 @@ public final class RemoteProcessor implements Processor
         }
     }
 
-    private ClusterMetadata fetchLogAndWaitInternal()
+    public static ClusterMetadata fetchLogAndWait(CandidateIterator candidateIterator, LocalLog log)
     {
-        return fetchLogAndWait(new CandidateIterator(candidates(true), false), log);
+        try
+        {
+            return fetchLogAndWaitInternal(candidateIterator, log).awaitUninterruptibly().get();
+        }
+        catch (InterruptedException | ExecutionException e)
+        {
+            throw new RuntimeException(e);
+        }
     }
 
-    public static ClusterMetadata fetchLogAndWait(CandidateIterator candidateIterator, LocalLog log)
+    private static Future<ClusterMetadata> fetchLogAndWaitInternal(CandidateIterator candidates,
+                                                                   LocalLog log)
     {
         try (Timer.Context ctx = TCMMetrics.instance.fetchCMSLogLatency.time())
         {
+            Promise<LogState> remoteRequest = new AsyncPromise<>();
             Epoch currentEpoch = log.metadata().epoch;
-            LogState replay = sendWithCallback(Verb.TCM_FETCH_CMS_LOG_REQ,
-                                               new FetchCMSLog(currentEpoch, ClusterMetadataService.state() == REMOTE),
-                                               candidateIterator,
-                                               new Retry.Backoff(TCMMetrics.instance.fetchLogRetries));
-            if (!replay.isEmpty())
-            {
-                logger.info("Replay request returned replay data: {}", replay);
-                log.append(replay);
-                TCMMetrics.instance.cmsLogEntriesFetched(currentEpoch, replay.latestEpoch());
-            }
-
-            return log.waitForHighestConsecutive();
+            sendWithCallbackAsync(remoteRequest,
+                                  Verb.TCM_FETCH_CMS_LOG_REQ,
+                                  new FetchCMSLog(currentEpoch, ClusterMetadataService.state() == REMOTE),
+                                  candidates,
+                                  new Retry.Backoff(TCMMetrics.instance.fetchLogRetries));
+            return remoteRequest.map((replay) -> {
+                if (!replay.isEmpty())
+                {
+                    logger.info("Replay request returned replay data: {}", replay);
+                    log.append(replay);
+                    TCMMetrics.instance.cmsLogEntriesFetched(currentEpoch, replay.latestEpoch());
+                }
+                return log.waitForHighestConsecutive();
+            });
         }
     }
 
@@ -184,6 +207,8 @@ public final class RemoteProcessor implements Processor
             {
                 if (promise.isCancelled() || promise.isDone())
                     return;
+                if (Thread.currentThread().isInterrupted())
+                    promise.setFailure(new InterruptedException());
                 if (!candidates.hasNext())
                     promise.tryFailure(new IllegalStateException(String.format("Ran out of candidates while sending %s: %s", verb, candidates)));
 

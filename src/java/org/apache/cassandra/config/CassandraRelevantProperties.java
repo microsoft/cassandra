@@ -101,6 +101,7 @@ public enum CassandraRelevantProperties
     CASSANDRA_VERSION("cassandra.version"),
     /** default heartbeating period is 1 minute */
     CHECK_DATA_RESURRECTION_HEARTBEAT_PERIOD("check_data_resurrection_heartbeat_period_milli", "60000"),
+    CHRONICLE_ANALYTICS_DISABLE("chronicle.analytics.disable"),
     CHRONICLE_ANNOUNCER_DISABLE("chronicle.announcer.disable"),
     CLOCK_GLOBAL("cassandra.clock"),
     CLOCK_MONOTONIC_APPROX("cassandra.monotonic_clock.approx"),
@@ -205,6 +206,8 @@ public enum CassandraRelevantProperties
     DTEST_API_LOG_TOPOLOGY("cassandra.dtest.api.log.topology"),
     /** This property indicates if the code is running under the in-jvm dtest framework */
     DTEST_IS_IN_JVM_DTEST("org.apache.cassandra.dtest.is_in_jvm_dtest"),
+    /** In_JVM dtest property indicating that the test should use "latest" configuration */
+    DTEST_JVM_DTESTS_USE_LATEST("jvm_dtests.latest"),
     ENABLE_DC_LOCAL_COMMIT("cassandra.enable_dc_local_commit", "true"),
     /**
      * Whether {@link org.apache.cassandra.db.ConsistencyLevel#NODE_LOCAL} should be allowed.
@@ -316,14 +319,6 @@ public enum CassandraRelevantProperties
     /** Java Virtual Machine implementation name */
     JAVA_VM_NAME("java.vm.name"),
     JOIN_RING("cassandra.join_ring", "true"),
-    /**
-     * {@link StorageCompatibilityMode} mode sets how the node will behave, sstable or messaging versions to use etc according to a yaml setting. 
-     * But many tests don't load the config hence we need to force it otherwise they would run always under the default. Config is null for junits 
-     * that don't load the config. Get from env var that CI/build.xml sets.
-     *
-     * This is a dev/CI only property. Do not use otherwise.
-     */
-    JUNIT_STORAGE_COMPATIBILITY_MODE("cassandra.junit_storage_compatibility_mode", StorageCompatibilityMode.NONE.toString()),
     /** startup checks properties */
     LIBJEMALLOC("cassandra.libjemalloc"),
     /** Line separator ("\n" on UNIX). */
@@ -431,9 +426,6 @@ public enum CassandraRelevantProperties
     SAI_INTERSECTION_CLAUSE_LIMIT("cassandra.sai.intersection_clause_limit", "2"),
     /** Latest version to be used for SAI index writing */
     SAI_LATEST_VERSION("cassandra.sai.latest_version", "aa"),
-    SAI_MAX_FROZEN_TERM_SIZE("cassandra.sai.max_frozen_term_size", "5KiB"),
-    SAI_MAX_STRING_TERM_SIZE("cassandra.sai.max_string_term_size", "1KiB"),
-    SAI_MAX_VECTOR_TERM_SIZE("cassandra.sai.max_vector_term_size", "32KiB"),
 
     /** Minimum number of reachable leaves for a given node to be eligible for an auxiliary posting list */
     SAI_MINIMUM_POSTINGS_LEAVES("cassandra.sai.minimum_postings_leaves", "64"),
@@ -483,6 +475,7 @@ public enum CassandraRelevantProperties
     SET_SEP_THREAD_NAME("cassandra.set_sep_thread_name", "true"),
     SHUTDOWN_ANNOUNCE_DELAY_IN_MS("cassandra.shutdown_announce_in_ms", "2000"),
     SIZE_RECORDER_INTERVAL("cassandra.size_recorder_interval", "300"),
+    SKIP_AUTH_SETUP("cassandra.skip_auth_setup", "false"),
     SKIP_GC_INSPECTOR("cassandra.skip_gc_inspector", "false"),
     SKIP_PAXOS_REPAIR_ON_TOPOLOGY_CHANGE("cassandra.skip_paxos_repair_on_topology_change"),
     /** If necessary for operational purposes, permit certain keyspaces to be ignored for paxos topology repairs. */
@@ -567,7 +560,6 @@ public enum CassandraRelevantProperties
      * can be also done manually for that particular case: {@code flush(SchemaConstants.SCHEMA_KEYSPACE_NAME);}. */
     TEST_FLUSH_LOCAL_SCHEMA_CHANGES("cassandra.test.flush_local_schema_changes", "true"),
     TEST_HARRY_SWITCH_AFTER("cassandra.test.harry.progression.switch-after", "1"),
-    TEST_IGNORE_SIGAR("cassandra.test.ignore_sigar"),
     TEST_INVALID_LEGACY_SSTABLE_ROOT("invalid-legacy-sstable-root"),
     TEST_JVM_DTEST_DISABLE_SSL("cassandra.test.disable_ssl"),
     TEST_JVM_SHUTDOWN_MESSAGING_GRACEFULLY("cassandra.test.messagingService.gracefulShutdown", "false"),
@@ -579,7 +571,6 @@ public enum CassandraRelevantProperties
     TEST_REUSE_PREPARED("cassandra.test.reuse_prepared", "true"),
     TEST_ROW_CACHE_SIZE("cassandra.test.row_cache_size"),
     TEST_SERIALIZATION_WRITES("cassandra.test-serialization-writes"),
-    TEST_SIGAR_NATIVE_LOGGING("sigar.nativeLogging", "true"),
     TEST_SIMULATOR_DEBUG("cassandra.test.simulator.debug"),
     TEST_SIMULATOR_DETERMINISM_CHECK("cassandra.test.simulator.determinismcheck", "none"),
     TEST_SIMULATOR_LIVENESS_CHECK("cassandra.test.simulator.livenesscheck", "true"),
@@ -590,6 +581,14 @@ public enum CassandraRelevantProperties
     TEST_SIMULATOR_PRINT_ASM_TYPES("cassandra.test.simulator.print_asm_types", ""),
     TEST_SKIP_CRYPTO_PROVIDER_INSTALLATION("cassandra.test.security.skip.provider.installation", "false"),
     TEST_SSTABLE_FORMAT_DEVELOPMENT("cassandra.test.sstableformatdevelopment"),
+    /**
+     * {@link StorageCompatibilityMode} mode sets how the node will behave, sstable or messaging versions to use etc according to a yaml setting.
+     * But many tests don't load the config hence we need to force it otherwise they would run always under the default. Config is null for junits
+     * that don't load the config. Get from env var that CI/build.xml sets.
+     *
+     * This is a dev/CI only property. Do not use otherwise.
+     */
+    TEST_STORAGE_COMPATIBILITY_MODE("cassandra.test.storage_compatibility_mode", StorageCompatibilityMode.NONE.toString()),
     TEST_STRICT_LCS_CHECKS("cassandra.test.strict_lcs_checks"),
     /** Turns some warnings into exceptions for testing. */
     TEST_STRICT_RUNTIME_CHECKS("cassandra.strict.runtime.checks"),

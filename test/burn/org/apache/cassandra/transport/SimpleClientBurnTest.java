@@ -103,7 +103,7 @@ public class SimpleClientBurnTest
                                             .withPort(port)
                                             .withPipelineConfigurator(configurator)
                                             .build();
-        ClientMetrics.instance.init(Collections.singleton(server));
+        ClientMetrics.instance.init(server);
         server.start();
 
         Message.Type.QUERY.unsafeSetCodec(new Message.Codec<QueryMessage>()
@@ -113,7 +113,8 @@ public class SimpleClientBurnTest
                 QueryMessage queryMessage = QueryMessage.codec.decode(body, version);
                 return new QueryMessage(queryMessage.query, queryMessage.options)
                 {
-                    protected Message.Response execute(QueryState state, long queryStartNanoTime, boolean traceRequest)
+                    @Override
+                    protected Message.Response execute(QueryState state, Dispatcher.RequestTime requestTime, boolean traceRequest)
                     {
                         int idx = Integer.parseInt(queryMessage.query);
                         SizeCaps caps = idx % largeMessageFrequency == 0 ? largeMessageCap : smallMessageCap;

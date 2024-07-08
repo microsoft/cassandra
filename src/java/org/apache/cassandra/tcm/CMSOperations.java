@@ -20,6 +20,7 @@ package org.apache.cassandra.tcm;
 
 import java.io.IOException;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -29,20 +30,33 @@ import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.schema.ReplicationParams;
+import org.apache.cassandra.tcm.membership.NodeId;
+import org.apache.cassandra.tcm.membership.NodeState;
 import org.apache.cassandra.tcm.membership.NodeVersion;
+import org.apache.cassandra.tcm.sequences.CancelCMSReconfiguration;
 import org.apache.cassandra.tcm.sequences.InProgressSequences;
 import org.apache.cassandra.tcm.sequences.ReconfigureCMS;
 import org.apache.cassandra.tcm.serialization.Version;
+import org.apache.cassandra.tcm.transformations.Unregister;
 import org.apache.cassandra.tcm.transformations.cms.AdvanceCMSReconfiguration;
+import org.apache.cassandra.tcm.transformations.cms.PrepareCMSReconfiguration;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.MBeanWrapper;
 
 public class CMSOperations implements CMSOperationsMBean
 {
     public static final String MBEAN_OBJECT_NAME = "org.apache.cassandra.tcm:type=CMSOperations";
+    public static final String MEMBERS = "MEMBERS";
+    public static final String NEEDS_RECONFIGURATION = "NEEDS_RECONFIGURATION";
+    public static final String IS_MEMBER = "IS_MEMBER";
+    public static final String SERVICE_STATE = "SERVICE_STATE";
+    public static final String IS_MIGRATING = "IS_MIGRATING";
+    public static final String EPOCH = "EPOCH";
+    public static final String LOCAL_PENDING = "LOCAL_PENDING";
+    public static final String COMMITS_PAUSED = "COMMITS_PAUSED";
+    public static final String REPLICATION_FACTOR = "REPLICATION_FACTOR";
 
     private static final Logger logger = LoggerFactory.getLogger(ClusterMetadataService.class);
     public static CMSOperations instance = new CMSOperations(ClusterMetadataService.instance());
@@ -73,23 +87,21 @@ public class CMSOperations implements CMSOperationsMBean
 
 
     @Override
-    public void reconfigureCMS(int rf, boolean sync)
+    public void reconfigureCMS(int rf)
     {
-        Runnable r = () -> cms.reconfigureCMS(ReplicationParams.simpleMeta(rf, ClusterMetadata.current().directory.knownDatacenters()));
-        if (sync)
-            r.run();
-        else
-            ScheduledExecutors.nonPeriodicTasks.submit(r);
+        cms.reconfigureCMS(ReplicationParams.simpleMeta(rf, ClusterMetadata.current().directory.knownDatacenters()));
     }
 
     @Override
-    public void reconfigureCMS(Map<String, Integer> rf, boolean sync)
+    public void reconfigureCMS(Map<String, Integer> rf)
     {
-        Runnable r = () -> ClusterMetadataService.instance().reconfigureCMS(ReplicationParams.ntsMeta(rf));
-        if (sync)
-            r.run();
-        else
-            ScheduledExecutors.nonPeriodicTasks.submit(r);
+        cms.reconfigureCMS(ReplicationParams.ntsMeta(rf));
+    }
+
+    @Override
+    public void cancelReconfigureCms()
+    {
+        cms.commit(CancelCMSReconfiguration.instance);
     }
 
     @Override
@@ -117,6 +129,9 @@ public class CMSOperations implements CMSOperationsMBean
                                                         .map(Object::toString)
                                                         .collect(Collectors.toList()));
 
+        if (advance.diff.removals.isEmpty() && advance.diff.additions.isEmpty())
+            status.put("INCOMPLETE", Collections.singletonList("All operations have finished but metadata keyspace ranges are still locked"));
+
         return status;
     }
 
@@ -125,25 +140,25 @@ public class CMSOperations implements CMSOperationsMBean
     {
         Map<String, String> info = new HashMap<>();
         ClusterMetadata metadata = ClusterMetadata.current();
-        ClusterMetadataService service = ClusterMetadataService.instance();
         String members = metadata.fullCMSMembers().stream().sorted().map(Object::toString).collect(Collectors.joining(","));
-        info.put("MEMBERS", members);
-        info.put("IS_MEMBER", Boolean.toString(service.isCurrentMember(FBUtilities.getBroadcastAddressAndPort())));
-        info.put("SERVICE_STATE", ClusterMetadataService.state(metadata).toString());
-        info.put("IS_MIGRATING", Boolean.toString(service.isMigrating()));
-        info.put("EPOCH", Long.toString(metadata.epoch.getEpoch()));
-        info.put("LOCAL_PENDING", Integer.toString(ClusterMetadataService.instance().log().pendingBufferSize()));
-        info.put("COMMITS_PAUSED", Boolean.toString(service.commitsPaused()));
-        info.put("REPLICATION_FACTOR", ReplicationParams.meta(metadata).toString());
+        info.put(MEMBERS, members);
+        info.put(NEEDS_RECONFIGURATION, Boolean.toString(PrepareCMSReconfiguration.needsReconfiguration(metadata)));
+        info.put(IS_MEMBER, Boolean.toString(cms.isCurrentMember(FBUtilities.getBroadcastAddressAndPort())));
+        info.put(SERVICE_STATE, ClusterMetadataService.state(metadata).toString());
+        info.put(IS_MIGRATING, Boolean.toString(cms.isMigrating()));
+        info.put(EPOCH, Long.toString(metadata.epoch.getEpoch()));
+        info.put(LOCAL_PENDING, Integer.toString(cms.log().pendingBufferSize()));
+        info.put(COMMITS_PAUSED, Boolean.toString(cms.commitsPaused()));
+        info.put(REPLICATION_FACTOR, ReplicationParams.meta(metadata).toString());
         return info;
     }
 
     @Override
-    public void sealPeriod()
+    public void snapshotClusterMetadata()
     {
-        logger.info("Sealing current period in metadata log");
-        long period = ClusterMetadataService.instance().sealPeriod().period;
-        logger.info("Current period {} is sealed", period);
+        logger.info("Triggering cluster metadata snapshot");
+        Epoch epoch = cms.triggerSnapshot().epoch;
+        logger.info("Cluster metadata snapshot triggered at {}", epoch);
     }
 
     @Override
@@ -151,13 +166,13 @@ public class CMSOperations implements CMSOperationsMBean
     {
         if (!DatabaseDescriptor.getUnsafeTCMMode())
             throw new IllegalStateException("Cluster is not running unsafe TCM mode, can't revert epoch");
-        ClusterMetadataService.instance().revertToEpoch(Epoch.create(epoch));
+        cms.revertToEpoch(Epoch.create(epoch));
     }
 
     @Override
     public String dumpClusterMetadata(long epoch, long transformToEpoch, String version) throws IOException
     {
-        return ClusterMetadataService.instance().dumpClusterMetadata(Epoch.create(epoch), Epoch.create(transformToEpoch), Version.valueOf(version));
+        return cms.dumpClusterMetadata(Epoch.create(epoch), Epoch.create(transformToEpoch), Version.valueOf(version));
     }
 
     @Override
@@ -173,27 +188,70 @@ public class CMSOperations implements CMSOperationsMBean
     {
         if (!DatabaseDescriptor.getUnsafeTCMMode())
             throw new IllegalStateException("Cluster is not running unsafe TCM mode, can't load cluster metadata " + file);
-        ClusterMetadataService.instance().loadClusterMetadata(file);
+        cms.loadClusterMetadata(file);
     }
 
     @Override
     public void setCommitsPaused(boolean paused)
     {
         if (paused)
-            ClusterMetadataService.instance().pauseCommits();
+            cms.pauseCommits();
         else
-            ClusterMetadataService.instance().resumeCommits();
+            cms.resumeCommits();
     }
 
     @Override
     public boolean getCommitsPaused()
     {
-        return ClusterMetadataService.instance().commitsPaused();
+        return cms.commitsPaused();
     }
 
     @Override
     public boolean cancelInProgressSequences(String sequenceOwner, String expectedSequenceKind)
     {
         return InProgressSequences.cancelInProgressSequences(sequenceOwner, expectedSequenceKind);
+    }
+
+    @Override
+    public void unregisterLeftNodes(List<String> nodeIdStrings)
+    {
+        List<NodeId> nodeIds = nodeIdStrings.stream().map(NodeId::fromString).collect(Collectors.toList());
+        ClusterMetadata metadata = ClusterMetadata.current();
+        List<NodeId> nonLeftNodes = nodeIds.stream()
+                                           .filter(nodeId -> metadata.directory.peerState(nodeId) != NodeState.LEFT)
+                                           .collect(Collectors.toList());
+        if (!nonLeftNodes.isEmpty())
+        {
+            StringBuilder message = new StringBuilder();
+            for (NodeId nonLeft : nonLeftNodes)
+            {
+                NodeState nodeState = metadata.directory.peerState(nonLeft);
+                message.append("Node ").append(nonLeft.id()).append(" is in state ").append(nodeState);
+                switch (nodeState)
+                {
+                    case REGISTERED:
+                    case BOOTSTRAPPING:
+                    case BOOT_REPLACING:
+                        message.append(" - need to use `nodetool abortbootstrap` instead of unregistering").append('\n');
+                        break;
+                    case JOINED:
+                        message.append(" - use `nodetool decommission` or `nodetool removenode` to remove this node").append('\n');
+                        break;
+                    case MOVING:
+                        message.append(" - wait until move has been completed, then use `nodetool decommission` or `nodetool removenode` to remove this node").append('\n');
+                        break;
+                    case LEAVING:
+                        message.append(" - wait until leave-operation has completed, then retry this command").append('\n');
+                        break;
+                }
+            }
+            throw new IllegalStateException("Can't unregister node(s):\n" + message);
+        }
+
+        for (NodeId nodeId : nodeIds)
+        {
+            logger.info("Unregistering " + nodeId);
+            cms.commit(new Unregister(nodeId, EnumSet.of(NodeState.LEFT)));
+        }
     }
 }

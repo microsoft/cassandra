@@ -52,6 +52,7 @@ import org.slf4j.LoggerFactory;
 
 import io.netty.util.concurrent.GlobalEventExecutor;
 import org.apache.cassandra.Util;
+import org.apache.cassandra.audit.AuditLogManager;
 import org.apache.cassandra.auth.AuthCache;
 import org.apache.cassandra.batchlog.Batch;
 import org.apache.cassandra.batchlog.BatchlogManager;
@@ -131,12 +132,14 @@ import org.apache.cassandra.service.paxos.PaxosRepair;
 import org.apache.cassandra.service.paxos.PaxosState;
 import org.apache.cassandra.service.paxos.uncommitted.UncommittedTableData;
 import org.apache.cassandra.service.reads.thresholds.CoordinatorWarnings;
+import org.apache.cassandra.service.snapshot.SnapshotManager;
 import org.apache.cassandra.streaming.StreamManager;
 import org.apache.cassandra.streaming.StreamReceiveTask;
 import org.apache.cassandra.streaming.StreamTransferTask;
 import org.apache.cassandra.streaming.async.NettyStreamingChannel;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.ClusterMetadataService;
+import org.apache.cassandra.tcm.EpochAwareDebounce;
 import org.apache.cassandra.tcm.Startup;
 import org.apache.cassandra.tcm.membership.NodeId;
 import org.apache.cassandra.tcm.membership.NodeState;
@@ -484,6 +487,19 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
         }
     }
 
+    @VisibleForTesting
+    public static Message.Header deserializeHeader(IMessage message)
+    {
+        try (DataInputBuffer in = new DataInputBuffer(message.bytes()))
+        {
+            return Message.serializer.deserializeHeader(in, toCassandraInetAddressAndPort(message.from()), message.version());
+        }
+        catch (Throwable t)
+        {
+            throw new RuntimeException("Can not deserialize heaader " + message, t);
+        }
+    }
+
     @Override
     public void receiveMessage(IMessage message)
     {
@@ -811,6 +827,8 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
         CassandraDaemon.getInstanceForTesting().completeSetup();
         CassandraDaemon.enableAutoCompaction(Schema.instance.getKeyspaces());
 
+        AuditLogManager.instance.initialize();
+
         if (config.has(NATIVE_PROTOCOL))
         {
             CassandraDaemon.getInstanceForTesting().initializeClientTransports();
@@ -834,7 +852,7 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
     public void postStartup()
     {
         sync(() ->
-            StorageService.instance.doAuthSetup()
+            StorageService.instance.doAuthSetup(false)
         ).run();
     }
 
@@ -925,7 +943,8 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
                                 () -> SSTableReader.shutdownBlocking(1L, MINUTES),
                                 () -> shutdownAndWait(Collections.singletonList(ActiveRepairService.repairCommandExecutor())),
                                 () -> ActiveRepairService.instance().shutdownNowAndWait(1L, MINUTES),
-                                () -> org.apache.cassandra.service.snapshot.SnapshotManager.shutdownAndWait(1L, MINUTES)
+                                () -> EpochAwareDebounce.instance.close(),
+                                () -> SnapshotManager.shutdownAndWait(1L, MINUTES)
             );
 
             internodeMessagingStarted = false;

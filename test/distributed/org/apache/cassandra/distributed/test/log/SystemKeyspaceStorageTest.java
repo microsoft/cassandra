@@ -19,31 +19,28 @@
 package org.apache.cassandra.distributed.test.log;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Random;
-import org.junit.Assert;
 import org.junit.Test;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.QueryProcessor;
-import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.distributed.test.ExecUtil;
 import org.apache.cassandra.harry.sut.TokenPlacementModel;
 import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.tcm.Epoch;
-import org.apache.cassandra.tcm.Sealed;
+import org.apache.cassandra.tcm.log.Entry;
 import org.apache.cassandra.tcm.log.LogState;
 import org.apache.cassandra.tcm.FetchCMSLog;
-import org.apache.cassandra.tcm.log.Replication;
 import org.apache.cassandra.tcm.transformations.CustomTransformation;
 import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.tcm.ClusterMetadata;
-import org.apache.cassandra.utils.BiMultiValMap;
 import org.apache.cassandra.utils.FBUtilities;
 
 import static org.apache.cassandra.db.SystemKeyspace.SNAPSHOT_TABLE_NAME;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 public class SystemKeyspaceStorageTest extends CoordinatorPathTestBase
 {
@@ -51,34 +48,35 @@ public class SystemKeyspaceStorageTest extends CoordinatorPathTestBase
     public void testLogStateQuery() throws Throwable
     {
         cmsNodeTest((cluster, simulatedCluster) -> {
-            // Disable snapshots on CMS "client" nodes
+            // Disable periodic snapshotting
             DatabaseDescriptor.setMetadataSnapshotFrequency(Integer.MAX_VALUE);
             cluster.get(1).runOnInstance(() -> DatabaseDescriptor.setMetadataSnapshotFrequency(Integer.MAX_VALUE));
             Random rng = new Random(1L);
 
-            // Map of epoch to period
-            BiMultiValMap<Epoch, Long> epochToPeriod = new BiMultiValMap<>();
             // Generate some epochs
             int cnt = 0;
-            int periodSize = rng.nextInt(10);
-            // set up a few epochs
+            int nextSnapshotIn = rng.nextInt(10);
+            List<Epoch> allEpochs = new ArrayList<>();
+            List<Epoch> allSnapshots = new ArrayList<>();
+
             for (int i = 0; i < 500; i++)
             {
                 try
                 {
-                    if (periodSize == 0)
+                    if (nextSnapshotIn == 0)
                     {
-                        cluster.get(1).runOnInstance(() -> ClusterMetadataService.instance().sealPeriod());
+                        cluster.get(1).runOnInstance(() -> ClusterMetadataService.instance().triggerSnapshot());
                         ClusterMetadata metadata = ClusterMetadataService.instance().processor().fetchLogAndWait();
-                        epochToPeriod.put(metadata.epoch, metadata.period);
-                        periodSize = rng.nextInt(10);
+                        allEpochs.add(metadata.epoch);
+                        allSnapshots.add(metadata.epoch);
+                        nextSnapshotIn = rng.nextInt(10);
                     }
                     else
                     {
-                        periodSize--;
+                        nextSnapshotIn--;
                     }
                     ClusterMetadata metadata = ClusterMetadataService.instance().commit(CustomTransformation.make(cnt++));
-                    epochToPeriod.put(metadata.epoch, metadata.period);
+                    allEpochs.add(metadata.epoch);
                 }
                 catch (Throwable e)
                 {
@@ -88,76 +86,64 @@ public class SystemKeyspaceStorageTest extends CoordinatorPathTestBase
 
             ClusterMetadataService.instance().processor().fetchLogAndWait();
 
-            List<Epoch> allEpochs = new ArrayList<>(epochToPeriod.keySet());
-            List<Long> allPeriods = cluster.get(1).callOnInstance(() -> getAllSnapshots());
-            List<Long> remainingPeriods = new ArrayList<>(allPeriods);
+            List<Epoch> remainingSnapshots = new ArrayList<>(allSnapshots);
 
             // Delete about a half (but potentially up to 100%) of all possible snapshots
-            for (int i = 0; i < allPeriods.size(); i++)
+            for (int i = 0; i < allSnapshots.size(); i++)
             {
                 if (rng.nextBoolean())
                 {
-                    // pick a sealed period for which we'll delete the snapshot
-                    long toRemovePeriod = remainingPeriods.remove(rng.nextInt(remainingPeriods.size()));
-                    // lookup the max epoch for the period, this is the key to the snapshots table
-                    long toRemoveEpoch = maxEpochInPeriod(epochToPeriod, toRemovePeriod).getEpoch();
-                    cluster.get(1).runOnInstance(() -> deleteSnapshot(toRemoveEpoch));
+                    // pick a snapshot to delete
+                    Epoch toRemoveSnapshot = remainingSnapshots.remove(rng.nextInt(remainingSnapshots.size()));
+                    cluster.get(1).runOnInstance(() -> deleteSnapshot(toRemoveSnapshot.getEpoch()));
                 }
             }
-
+            Epoch latestSnapshot = remainingSnapshots.get(remainingSnapshots.size() - 1);
+            Epoch lastEpoch =  allEpochs.stream().max(Comparator.naturalOrder()).get();
             repeat(10, () -> {
-                long lastSealed = remainingPeriods.isEmpty() ? -1 : remainingPeriods.get(rng.nextInt(remainingPeriods.size()));
-                if (lastSealed > 0)
-                {
-                    Epoch maxInPeriod = maxEpochInPeriod(epochToPeriod, lastSealed);
-                    cluster.get(1).runOnInstance(() -> forceLastSealed(lastSealed, maxInPeriod.getEpoch()));
-                }
-
                 repeat(100, () -> {
                     Epoch since = allEpochs.get(rng.nextInt(allEpochs.size()));
                     for (boolean consistentReplay : new boolean[]{ true, false })
                     {
                         LogState logState = simulatedCluster.node(2).requestResponse(new FetchCMSLog(since, consistentReplay));
-                        // Either:
-                        //  * we have no snapshots to catch up from which may
-                        //  * we've requested an epoch that's past last sealed snapshot
-                        //  * the epoch we're requesting is the max in the last sealed snapshot, in which case we
-                        //    do not send it
-                        // so the case is equivalent to the above replication test.
-                        if (remainingPeriods.isEmpty()
-                            || epochToPeriod.get(since) > lastSealed
-                            || since.is(maxEpochInPeriod(epochToPeriod, lastSealed)))
+                        // if we return a snapshot it is always the most recent one
+                        // we don't return a snapshot if there is only 1 snapshot after `since`
+                        Epoch start = since;
+                        if (logState.baseState == null)
                         {
-                            Assert.assertNull(logState.baseState);
-                            assertReplication(since, allEpochs, logState.transformations);
+                            if (logState.entries.isEmpty()) // requesting an epoch after the last known epoch -> null + empty entries
+                                assertTrue(since.getEpoch() >= lastEpoch.getEpoch());
+                            else
+                                // first entry should be epoch since + 1
+                                assertEquals(start.nextEpoch(), logState.entries.get(0).epoch);
                         }
-                        // We have a snapshot to catch up from, so it has to be returned
                         else
                         {
-                            Assert.assertEquals(lastSealed, logState.baseState.period);
-                            Assert.assertTrue(logState.baseState.lastInPeriod);
-                            assertReplication(logState.baseState.epoch, allEpochs, logState.transformations);
+                            assertEquals(latestSnapshot, logState.baseState.epoch);
+                            start = logState.baseState.epoch;
+                            if (logState.entries.isEmpty()) // no entries, snapshot should have the same epoch as since
+                                assertEquals(since, start);
+                            else // first epoch in entries should be snapshot epoch + 1
+                                assertEquals(start.nextEpoch(), logState.entries.get(0).epoch);
                         }
+
+                        for (Entry entry : logState.entries)
+                        {
+                            start = start.nextEpoch();
+                            assertEquals(start, entry.epoch);
+                        }
+                        assertEquals(lastEpoch, start);
                     }
                 });
             });
         });
     }
 
-    private Epoch maxEpochInPeriod(BiMultiValMap<Epoch, Long> epochToPeriod, long period)
-    {
-        return epochToPeriod.inverse()
-                            .get(period)
-                            .stream()
-                            .max(Comparator.naturalOrder())
-                            .get();
-    }
-
     @Test
     public void bounceNodeBootrappedFromSnapshot() throws Throwable
     {
         coordinatorPathTest(new TokenPlacementModel.SimpleReplicationFactor(3), (cluster, simulatedCluster) -> {
-            ClusterMetadataService.instance().sealPeriod();
+            ClusterMetadataService.instance().triggerSnapshot();
             ClusterMetadataService.instance().log().waitForHighestConsecutive();
             ClusterMetadataService.instance().snapshotManager().storeSnapshot(ClusterMetadata.current());
 
@@ -178,25 +164,6 @@ public class SystemKeyspaceStorageTest extends CoordinatorPathTestBase
         }, false);
     }
 
-    public static void assertReplication(Epoch since, List<Epoch> allEpochs, Replication replication)
-    {
-        // +1 because we assume we already know the `since` epoch
-        int offset = Collections.binarySearch(allEpochs, since) + 1;
-
-        if (since.equals(allEpochs.get(allEpochs.size() - 1)))
-            Assert.assertEquals(0, replication.entries().size());
-        else
-            Assert.assertEquals(since.getEpoch() + 1, replication.entries().get(0).epoch.getEpoch());
-
-        Assert.assertEquals(allEpochs.get(allEpochs.size() - 1).getEpoch() - since.getEpoch(),
-                            replication.entries().size());
-        for (int i = 0; i < replication.entries().size(); i++)
-        {
-            Assert.assertEquals(String.format("Got mismatch while replication starting with %s", since),
-                                allEpochs.get(offset + i), replication.entries().get(i).epoch);
-        }
-    }
-
     public static void repeat(int num, ExecUtil.ThrowingSerializableRunnable r)
     {
         for (int i = 0; i < num; i++)
@@ -212,25 +179,9 @@ public class SystemKeyspaceStorageTest extends CoordinatorPathTestBase
         }
     }
 
-    public static List<Long> getAllSnapshots()
-    {
-        List<Long> allPeriods = new ArrayList<>();
-        String query = String.format("SELECT period FROM %s.%s", SchemaConstants.SYSTEM_KEYSPACE_NAME, SNAPSHOT_TABLE_NAME);
-        for (UntypedResultSet.Row row : QueryProcessor.executeInternal(query))
-            allPeriods.add(row.getLong("period"));
-
-        return allPeriods;
-    }
-
     public static void deleteSnapshot(long epoch)
     {
         String query = String.format("DELETE FROM %s.%s WHERE epoch = ?", SchemaConstants.SYSTEM_KEYSPACE_NAME, SNAPSHOT_TABLE_NAME);
         QueryProcessor.executeInternal(query, epoch);
-    }
-
-    public static void forceLastSealed(long period, long epoch)
-    {
-        Sealed.unsafeClearLookup();
-        Sealed.recordSealedPeriod(period, Epoch.create(epoch));
     }
 }

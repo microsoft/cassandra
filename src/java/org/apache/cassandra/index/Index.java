@@ -66,6 +66,7 @@ import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.IndexMetadata;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.service.ClientState;
 
 /**
  * Consisting of a top level Index interface and two sub-interfaces which handle read and write operations,
@@ -498,9 +499,11 @@ public interface Index
      * will process it. The partition key as well as the clustering and
      * cell values for each row in the update may be checked by index
      * implementations
+     * 
      * @param update PartitionUpdate containing the values to be validated by registered Index implementations
+     * @param state state related to the client connection
      */
-    public void validate(PartitionUpdate update) throws InvalidRequestException;
+    public void validate(PartitionUpdate update, ClientState state) throws InvalidRequestException;
 
     /**
      * Returns the SSTable-attached {@link Component}s created by this index.
@@ -849,18 +852,19 @@ public interface Index
         Set<Component> getComponents();
 
         /**
-         * Validates all indexes in the group against the specified SSTables. 
-         * 
+         * Validates all indexes in the group against the specified SSTables.
+         *
          * @param sstables SSTables for which indexes in the group should be built
          * @param throwOnIncomplete whether to throw an error if any index in the group is incomplete
-         * 
+         * @param validateChecksum whether checksum will be tested as part of the validation
+         *
          * @return true if all indexes in the group are complete and valid
-         *         false if any index is incomplete and {@code throwOnIncomplete} is false 
-         * 
+         *         false if any index is incomplete and {@code throwOnIncomplete} is false
+         *
          * @throws IllegalStateException if {@code throwOnIncomplete} is true and any index in the group is incomplete
          * @throws UncheckedIOException if there is a problem validating any on-disk component of an index in the group
          */
-        default boolean validateSSTableAttachedIndexes(Collection<SSTableReader> sstables, boolean throwOnIncomplete)
+        default boolean validateSSTableAttachedIndexes(Collection<SSTableReader> sstables, boolean throwOnIncomplete, boolean validateChecksum)
         {
             return true;
         }

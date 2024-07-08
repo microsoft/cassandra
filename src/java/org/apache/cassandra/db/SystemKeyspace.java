@@ -50,7 +50,6 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.SetMultimap;
 import com.google.common.collect.Sets;
-import com.google.common.io.ByteStreams;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -60,7 +59,6 @@ import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.cql3.statements.schema.CreateTableStatement;
 import org.apache.cassandra.db.commitlog.CommitLogPosition;
 import org.apache.cassandra.db.compaction.CompactionHistoryTabularData;
-import org.apache.cassandra.db.marshal.ByteBufferAccessor;
 import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.db.marshal.TimeUUIDType;
@@ -86,6 +84,7 @@ import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.RebufferingInputStream;
 import org.apache.cassandra.locator.IEndpointSnitch;
 import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.locator.MetaStrategy;
 import org.apache.cassandra.metrics.RestorableMeter;
 import org.apache.cassandra.metrics.TopPartitionTracker;
 import org.apache.cassandra.net.MessagingService;
@@ -113,7 +112,6 @@ import org.apache.cassandra.service.paxos.uncommitted.PaxosUncommittedIndex;
 import org.apache.cassandra.streaming.StreamOperation;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.Epoch;
-import org.apache.cassandra.tcm.Sealed;
 import org.apache.cassandra.tcm.membership.NodeState;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -127,6 +125,7 @@ import org.apache.cassandra.utils.concurrent.Future;
 import static java.lang.String.format;
 import static java.util.Collections.emptyMap;
 import static java.util.Collections.singletonMap;
+import static java.util.concurrent.TimeUnit.MICROSECONDS;
 import static org.apache.cassandra.config.Config.PaxosStatePurging.legacy;
 import static org.apache.cassandra.config.DatabaseDescriptor.paxosStatePurging;
 import static org.apache.cassandra.cql3.QueryProcessor.executeInternal;
@@ -178,8 +177,6 @@ public final class SystemKeyspace
     public static final String TOP_PARTITIONS = "top_partitions";
     public static final String METADATA_LOG = "local_metadata_log";
     public static final String SNAPSHOT_TABLE_NAME = "metadata_snapshots";
-    public static final String SEALED_PERIODS_TABLE_NAME = "metadata_sealed_periods";
-    public static final String LAST_SEALED_PERIOD_TABLE_NAME = "metadata_last_sealed_period";
 
     /**
      * By default the system keyspace tables should be stored in a single data directory to allow the server
@@ -213,14 +210,14 @@ public final class SystemKeyspace
         TABLE_ESTIMATES_TYPE_LOCAL_PRIMARY, AVAILABLE_RANGES_V2, TRANSFERRED_RANGES_V2, VIEW_BUILDS_IN_PROGRESS,
         BUILT_VIEWS, PREPARED_STATEMENTS, REPAIRS, TOP_PARTITIONS, LEGACY_PEERS, LEGACY_PEER_EVENTS,
         LEGACY_TRANSFERRED_RANGES, LEGACY_AVAILABLE_RANGES, LEGACY_SIZE_ESTIMATES, LEGACY_SSTABLE_ACTIVITY,
-        METADATA_LOG, SNAPSHOT_TABLE_NAME, SEALED_PERIODS_TABLE_NAME, LAST_SEALED_PERIOD_TABLE_NAME);
+        METADATA_LOG, SNAPSHOT_TABLE_NAME);
 
     public static final Set<String> TABLE_NAMES = ImmutableSet.of(
         BATCHES, PAXOS, PAXOS_REPAIR_HISTORY, BUILT_INDEXES, LOCAL, PEERS_V2, PEER_EVENTS_V2, 
         COMPACTION_HISTORY, SSTABLE_ACTIVITY_V2, TABLE_ESTIMATES, AVAILABLE_RANGES_V2, TRANSFERRED_RANGES_V2, VIEW_BUILDS_IN_PROGRESS, 
         BUILT_VIEWS, PREPARED_STATEMENTS, REPAIRS, TOP_PARTITIONS, LEGACY_PEERS, LEGACY_PEER_EVENTS, 
         LEGACY_TRANSFERRED_RANGES, LEGACY_AVAILABLE_RANGES, LEGACY_SIZE_ESTIMATES, LEGACY_SSTABLE_ACTIVITY,
-        METADATA_LOG, SNAPSHOT_TABLE_NAME, SEALED_PERIODS_TABLE_NAME, LAST_SEALED_PERIOD_TABLE_NAME);
+        METADATA_LOG, SNAPSHOT_TABLE_NAME);
 
     public static final TableMetadata Batches =
         parse(BATCHES,
@@ -457,6 +454,7 @@ public final class SystemKeyspace
                 + "PRIMARY KEY (keyspace_name, table_name, top_type))")
                 .build();
 
+    private static final TupleType TOP_TUPLE_TYPE = new TupleType(Arrays.asList(UTF8Type.instance, LongType.instance));
 
     private static final TableMetadata PreparedStatements =
         parse(PREPARED_STATEMENTS,
@@ -489,13 +487,12 @@ public final class SystemKeyspace
         parse(METADATA_LOG,
               "Local Metadata Log",
               "CREATE TABLE %s ("
-              + "period bigint,"
-              + "current_epoch bigint static,"
               + "epoch bigint,"
               + "entry_id bigint,"
               + "transformation blob,"
-              + "kind text,"
-              + "PRIMARY KEY (period, epoch))")
+              + "kind int,"
+              + "PRIMARY KEY (epoch))")
+        .partitioner(MetaStrategy.partitioner)
         .compaction(CompactionParams.twcs(ImmutableMap.of("compaction_window_unit","DAYS",
                                                           "compaction_window_size","1")))
         .build();
@@ -504,25 +501,9 @@ public final class SystemKeyspace
                                                         "ClusterMetadata snapshots",
                                                         "CREATE TABLE IF NOT EXISTS %s (" +
                                                         "epoch bigint PRIMARY KEY," +
-                                                        "period bigint," +
                                                         "snapshot blob)")
+                                                  .partitioner(MetaStrategy.partitioner)
                                                   .build();
-
-    public static final TableMetadata SealedPeriods = parse(SEALED_PERIODS_TABLE_NAME,
-                                                            "ClusterMetadata sealed periods",
-                                                            "CREATE TABLE IF NOT EXISTS %s (" +
-                                                            "max_epoch bigint PRIMARY KEY," +
-                                                            "period bigint)")
-                                                      .partitioner(new LocalPartitioner(LongType.instance))
-                                                      .build();
-
-    public static final TableMetadata LastSealedPeriod = parse(LAST_SEALED_PERIOD_TABLE_NAME,
-                                                               "ClusterMetadata last sealed period",
-                                                               "CREATE TABLE IF NOT EXISTS %s (" +
-                                                               "key text PRIMARY KEY," +
-                                                               "epoch bigint," +
-                                                               "period bigint)")
-                                                         .build();
 
     @Deprecated(since = "4.0")
     private static final TableMetadata LegacyPeers =
@@ -616,8 +597,6 @@ public final class SystemKeyspace
                          Repairs,
                          TopPartitions,
                          LocalMetadataLog,
-                         LastSealedPeriod,
-                         SealedPeriods,
                          Snapshots);
     }
 
@@ -1384,6 +1363,8 @@ public final class SystemKeyspace
 
     /**
      * Load the current paxos state for the table and key
+     *
+     * NOTE: nowInSec is typically provided as zero, and should not be assumed to be definitive, as the cache may apply different nowInSec filters
      */
     public static PaxosState.Snapshot loadPaxosState(DecoratedKey partitionKey, TableMetadata metadata, long nowInSec)
     {
@@ -1395,14 +1376,38 @@ public final class SystemKeyspace
             return new PaxosState.Snapshot(Ballot.none(), Ballot.none(), null, noneCommitted);
         }
 
+        long purgeBefore = 0;
+        long overrideTtlSeconds = 0;
+        switch (paxosStatePurging())
+        {
+            default: throw new AssertionError();
+            case legacy:
+            case gc_grace:
+                overrideTtlSeconds = metadata.params.gcGraceSeconds;
+                if (nowInSec > 0)
+                    purgeBefore = TimeUnit.SECONDS.toMicros(nowInSec - overrideTtlSeconds);
+                break;
+
+            case repaired:
+                ColumnFamilyStore cfs = Keyspace.openAndGetStoreIfExists(metadata);
+                if (cfs != null)
+                {
+                    long paxosPurgeGraceMicros = DatabaseDescriptor.getPaxosPurgeGrace(MICROSECONDS);
+                    purgeBefore = cfs.getPaxosRepairLowBound(partitionKey).uuidTimestamp() - paxosPurgeGraceMicros;
+                }
+        }
+
+
         Row row = results.get(0);
 
         Ballot promisedWrite = PaxosRows.getWritePromise(row);
+        if (promisedWrite.uuidTimestamp() < purgeBefore) promisedWrite = Ballot.none();
         Ballot promised = latest(promisedWrite, PaxosRows.getPromise(row));
+        if (promised.uuidTimestamp() < purgeBefore) promised = Ballot.none();
 
         // either we have both a recently accepted ballot and update or we have neither
-        Accepted accepted = PaxosRows.getAccepted(row);
-        Committed committed = PaxosRows.getCommitted(metadata, partitionKey, row);
+        Accepted accepted = PaxosRows.getAccepted(row, purgeBefore, overrideTtlSeconds);
+        Committed committed = PaxosRows.getCommitted(metadata, partitionKey, row, purgeBefore, overrideTtlSeconds);
         // fix a race with TTL/deletion resolution, where TTL expires after equal deletion is inserted; TTL wins the resolution, and is read using an old ballot's nowInSec
         if (accepted != null && !accepted.isAfter(committed))
             accepted = null;
@@ -1896,7 +1901,7 @@ public final class SystemKeyspace
         try
         {
             // See rangeToBytes above for why version is 0.
-            return (Range<Token>) Range.tokenSerializer.deserialize(ByteStreams.newDataInput(ByteBufferUtil.getArray(rawRange)),
+            return (Range<Token>) Range.tokenSerializer.deserialize(new DataInputBuffer(ByteBufferUtil.getArray(rawRange)),
                                                                     partitioner,
                                                                     0);
         }
@@ -1966,8 +1971,7 @@ public final class SystemKeyspace
         List<ByteBuffer> tupleList = new ArrayList<>(topPartitions.size());
         topPartitions.forEach(tp -> {
             String key = metadata.partitionKeyType.getString(tp.key.getKey());
-            tupleList.add(TupleType.buildValue(new ByteBuffer[] { UTF8Type.instance.decompose(key),
-                                                                  LongType.instance.decompose(tp.value)}));
+            tupleList.add(TOP_TUPLE_TYPE.pack(UTF8Type.instance.decompose(key), LongType.instance.decompose(tp.value)));
         });
         executeInternal(cql, metadata.keyspace, metadata.name, topType, tupleList, Date.from(Instant.ofEpochMilli(lastUpdate)));
     }
@@ -1990,9 +1994,9 @@ public final class SystemKeyspace
             TupleType tupleType = new TupleType(Lists.newArrayList(UTF8Type.instance, LongType.instance));
             for (ByteBuffer bb : top)
             {
-                ByteBuffer[] components = tupleType.split(ByteBufferAccessor.instance, bb);
-                String keyStr = UTF8Type.instance.compose(components[0]);
-                long value = LongType.instance.compose(components[1]);
+                List<ByteBuffer> components = tupleType.unpack(bb);
+                String keyStr = UTF8Type.instance.compose(components.get(0));
+                long value = LongType.instance.compose(components.get(1));
                 topPartitions.add(new TopPartitionTracker.TopPartition(metadata.partitioner.decorateKey(metadata.partitionKeyType.fromString(keyStr)), value));
             }
             return new TopPartitionTracker.StoredTopPartitions(topPartitions, lastUpdated);
@@ -2004,85 +2008,77 @@ public final class SystemKeyspace
         }
     }
 
-    public static void storeSnapshot(Epoch epoch, long period, ByteBuffer snapshot)
+    public static void storeSnapshot(Epoch epoch, ByteBuffer snapshot)
     {
-        logger.info("Storing snapshot of cluster metadata at epoch {} (period {})", epoch, period);
-        String query = String.format("INSERT INTO %s.%s (epoch, period, snapshot) VALUES (?, ?, ?)", SchemaConstants.SYSTEM_KEYSPACE_NAME, SNAPSHOT_TABLE_NAME);
-        executeInternal(query, epoch.getEpoch(), period, snapshot);
+        Preconditions.checkArgument(epoch.isAfter(Epoch.FIRST), "Cannot store a snapshot for an epoch less than " + Epoch.FIRST.getEpoch());
+        logger.info("Storing snapshot of cluster metadata at epoch {}", epoch);
+        String query = String.format("INSERT INTO %s.%s (epoch, snapshot) VALUES (?, ?)", SchemaConstants.SYSTEM_KEYSPACE_NAME, SNAPSHOT_TABLE_NAME);
+        executeInternal(query, epoch.getEpoch(), snapshot);
+        forceBlockingFlush(SNAPSHOT_TABLE_NAME);
     }
 
     public static ByteBuffer getSnapshot(Epoch epoch)
     {
+        Preconditions.checkArgument(epoch.isAfter(Epoch.FIRST), "Cannot retrieve a snapshot for an epoch less than " + Epoch.FIRST.getEpoch());
         logger.info("Getting snapshot of epoch = {}", epoch);
-        String query = String.format("SELECT SNAPSHOT FROM %s.%s WHERE epoch = ?", SchemaConstants.SYSTEM_KEYSPACE_NAME, SNAPSHOT_TABLE_NAME);
+        String query = String.format("SELECT snapshot FROM %s.%s WHERE epoch = ?", SchemaConstants.SYSTEM_KEYSPACE_NAME, SNAPSHOT_TABLE_NAME);
         UntypedResultSet res = executeInternal(query, epoch.getEpoch());
         if (res == null || res.isEmpty())
             return null;
-        return res.one().getBytes("snapshot").duplicate();
+        ByteBuffer bytes = res.one().getBytes("snapshot");
+        if (bytes == null || !bytes.hasRemaining())
+            return null;
+        return bytes.duplicate();
     }
 
-    public static Sealed findSealedPeriodForEpochScan(Epoch search)
+    /**
+     * We use ReversedLongLocalPartitioner here, which calculates token as Long.MAX_VALUE - key
+     *
+     * table is something like (assuming Long.MAX_VALUE is 1000 for easier calculations...):
+     * epoch | token(epoch)
+     * --------------------
+     *   100 | 900
+     *    90 | 910
+     *    80 | 920
+     *    70 | 970
+     *    ...
+     *
+     * so to find the first snapshot before epoch 85, we query the table with token(epoch) >= token(85)=915. Which gives us
+     * epoch 80, 70... and the first row is the first snapshot before `search`
+     */
+    public static ByteBuffer findSnapshotBefore(Epoch search)
     {
-        String query = String.format("SELECT max_epoch, period FROM %s.%s WHERE max_epoch >= ? LIMIT 1 ALLOW FILTERING", SchemaConstants.SYSTEM_KEYSPACE_NAME, SEALED_PERIODS_TABLE_NAME);
+        // during gossip upgrade we have epoch = Long.MIN_VALUE + 1 (and the reverse partitioner doesn't support negative keys)
+        search = search.isBefore(Epoch.EMPTY) ? Epoch.EMPTY : search;
+        String query = String.format("SELECT snapshot FROM %s.%s WHERE token(epoch) >= token(?) LIMIT 1", SchemaConstants.SYSTEM_KEYSPACE_NAME, SNAPSHOT_TABLE_NAME);
         UntypedResultSet res = executeInternal(query, search.getEpoch());
         if (res != null && !res.isEmpty())
-        {
-            long period = res.one().getLong("period");
-            long epoch = res.one().getLong("max_epoch");
-            return new Sealed(period, epoch);
-        }
-
-        // nothing found for this epoch, is the table empty or is the search epoch > the maximum
-        query = String.format("SELECT max_epoch, period FROM %s.%s LIMIT 1", SchemaConstants.SYSTEM_KEYSPACE_NAME, SEALED_PERIODS_TABLE_NAME);
-        res = executeInternal(query);
-        // table is empty, so any scan for the epoch will have to begin at Period.EMPTY
-        if (res == null || res.isEmpty())
-            return Sealed.EMPTY;
-
-        // the index table has some data, but is the search target greater than the max epoch in last sealed period?
-        // This query is relatively costly, so we do it last. Retain the min period/epoch that we did find in the
-        // previous query just in case we need them
-        // TODO add a nodetool command to rebuild the local sealed periods table
-        long lowestPeriod = res.one().getLong("period");
-        long lowestMaxEpoch = res.one().getLong("max_epoch");
-        logger.info("Scanning sealed periods by epoch table, this may be an expensive operation and the index table {} should be rebuilt", SEALED_PERIODS_TABLE_NAME);
-        query = String.format("SELECT max(max_epoch) AS max_epoch FROM %s.%s LIMIT 1 ALLOW FILTERING;", SchemaConstants.SYSTEM_KEYSPACE_NAME, SEALED_PERIODS_TABLE_NAME);
-        res = executeInternal(query);
-
-        // should never happen because the previous query returned the min, but just in case the table has been
-        // truncated since then, return the min Sealed.
-        if (res == null || res.isEmpty())
-            return new Sealed(lowestPeriod, lowestMaxEpoch);
-
-        // use the max epoch to look up the sealed period
-        long maxEpoch = res.one().getLong("max_epoch");
-        query = String.format("SELECT period FROM %s.%s WHERE max_epoch = ?", SchemaConstants.SYSTEM_KEYSPACE_NAME, SEALED_PERIODS_TABLE_NAME);
-        res = executeInternal(query, maxEpoch);
-        if (res == null || res.isEmpty())
-            return new Sealed(lowestPeriod, lowestMaxEpoch);
-        // this is the last recorded sealed period *before* the target epoch, so any scan should start at the
-        // *next* period, so we bump both period and epoch by 1
-        long maxPeriod = res.one().getLong("period");
-        return new Sealed(maxPeriod + 1, maxEpoch + 1);
+            return res.one().getBytes("snapshot").duplicate();
+        return null;
     }
 
-    public static Sealed getLastSealedPeriod()
+    public static List<Epoch> listSnapshotsSince(Epoch search)
     {
-        String query = String.format("SELECT epoch, period FROM %s.%s WHERE key = 'latest'", SchemaConstants.SYSTEM_KEYSPACE_NAME, LAST_SEALED_PERIOD_TABLE_NAME);
+        // during gossip upgrade we have epoch = Long.MIN_VALUE + 1 (and the reverse partitioner doesn't support negative keys)
+        search = search.isBefore(Epoch.EMPTY) ? Epoch.EMPTY : search;
+        String query = String.format("SELECT epoch FROM %s.%s WHERE token(epoch) < token(?)", SchemaConstants.SYSTEM_KEYSPACE_NAME, SNAPSHOT_TABLE_NAME);
+        UntypedResultSet res = executeInternal(query, search.getEpoch());
+        if (res == null)
+            return Collections.emptyList();
+
+        return res.stream().map(row -> Epoch.create(row.getLong("epoch"))).collect(Collectors.toList());
+    }
+
+    /**
+     * Find the latest snapshot we have in the log.
+     */
+    public static ByteBuffer findLastSnapshot()
+    {
+        String query = String.format("SELECT snapshot FROM %s.%s LIMIT 1", SchemaConstants.SYSTEM_KEYSPACE_NAME, SNAPSHOT_TABLE_NAME);
         UntypedResultSet res = executeInternal(query);
-        if (res == null || res.isEmpty())
-            return Sealed.EMPTY;
-        long epoch = res.one().getLong("epoch");
-        long period = res.one().getLong("period");
-        return new Sealed(period, Epoch.create(epoch));
-    }
-
-    public static void sealPeriod(long period, Epoch epoch)
-    {
-        String query = String.format("INSERT INTO %s.%s (max_epoch, period) VALUES (?,?)", SchemaConstants.SYSTEM_KEYSPACE_NAME, SEALED_PERIODS_TABLE_NAME);
-        executeInternal(query, epoch.getEpoch(), period);
-        query = String.format("UPDATE %s.%s SET period = ?, epoch = ? WHERE key = 'latest'", SchemaConstants.SYSTEM_KEYSPACE_NAME, LAST_SEALED_PERIOD_TABLE_NAME);
-        executeInternal(query, period, epoch.getEpoch());
+        if (res != null && !res.isEmpty())
+            return res.one().getBytes("snapshot").duplicate();
+        return null;
     }
 
     public static Map<InetAddressAndPort, EndpointState> peerEndpointStates()

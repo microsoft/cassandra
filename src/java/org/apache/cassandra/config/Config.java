@@ -39,6 +39,7 @@ import org.apache.cassandra.audit.AuditLogOptions;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.fql.FullQueryLoggerOptions;
 import org.apache.cassandra.index.internal.CassandraIndex;
+import org.apache.cassandra.io.compress.BufferType;
 import org.apache.cassandra.io.sstable.format.big.BigFormat;
 import org.apache.cassandra.service.StartupChecks.StartupCheckType;
 import org.apache.cassandra.utils.StorageCompatibilityMode;
@@ -213,6 +214,8 @@ public class Config
     @Replaces(oldName = "repair_session_space_in_mb", converter = Converters.MEBIBYTES_DATA_STORAGE_INT, deprecated = true)
     public volatile DataStorageSpec.IntMebibytesBound repair_session_space = null;
 
+    public volatile int concurrent_merkle_tree_requests = 0;
+
     public volatile boolean use_offheap_merkle_trees = true;
 
     public int storage_port = 7000;
@@ -281,7 +284,6 @@ public class Config
 
     public boolean start_native_transport = true;
     public int native_transport_port = 9042;
-    public Integer native_transport_port_ssl = null;
     public int native_transport_max_threads = 128;
     @Replaces(oldName = "native_transport_max_frame_size_in_mb", converter = Converters.MEBIBYTES_DATA_STORAGE_INT, deprecated = true)
     public DataStorageSpec.IntMebibytesBound native_transport_max_frame_size = new DataStorageSpec.IntMebibytesBound("16MiB");
@@ -346,7 +348,7 @@ public class Config
     public volatile int reject_repair_compaction_threshold = Integer.MAX_VALUE;
 
     // The number of executors to use for building secondary indexes
-    public int concurrent_index_builders = 2;
+    public volatile int concurrent_index_builders = 2;
 
     /**
      * @deprecated retry support removed on CASSANDRA-10992
@@ -908,8 +910,17 @@ public class Config
     public volatile boolean zero_ttl_on_twcs_warned = true;
     public volatile boolean zero_ttl_on_twcs_enabled = true;
     public volatile boolean non_partition_restricted_index_query_enabled = true;
+    public volatile boolean intersect_filtering_query_warned = true;
+    public volatile boolean intersect_filtering_query_enabled = true;
+
     public volatile int sai_sstable_indexes_per_query_warn_threshold = 32;
     public volatile int sai_sstable_indexes_per_query_fail_threshold = -1;
+    public volatile DataStorageSpec.LongBytesBound sai_string_term_size_warn_threshold = new DataStorageSpec.LongBytesBound("1KiB");
+    public volatile DataStorageSpec.LongBytesBound sai_string_term_size_fail_threshold = new DataStorageSpec.LongBytesBound("8KiB");
+    public volatile DataStorageSpec.LongBytesBound sai_frozen_term_size_warn_threshold = new DataStorageSpec.LongBytesBound("1KiB");
+    public volatile DataStorageSpec.LongBytesBound sai_frozen_term_size_fail_threshold = new DataStorageSpec.LongBytesBound("8KiB");
+    public volatile DataStorageSpec.LongBytesBound sai_vector_term_size_warn_threshold = new DataStorageSpec.LongBytesBound("16KiB");
+    public volatile DataStorageSpec.LongBytesBound sai_vector_term_size_fail_threshold = new DataStorageSpec.LongBytesBound("32KiB");
 
     public volatile DurationSpec.LongNanosecondsBound streaming_state_expires = new DurationSpec.LongNanosecondsBound("3d");
     public volatile DataStorageSpec.LongBytesBound streaming_state_size = new DataStorageSpec.LongBytesBound("40MiB");
@@ -1174,7 +1185,22 @@ public class Config
         unslabbed_heap_buffers_logged,
         heap_buffers,
         offheap_buffers,
-        offheap_objects
+        offheap_objects;
+
+        public BufferType toBufferType()
+        {
+            switch (this)
+            {
+                case unslabbed_heap_buffers:
+                case heap_buffers:
+                    return BufferType.ON_HEAP;
+                case offheap_buffers:
+                case offheap_objects:
+                    return BufferType.OFF_HEAP;
+                default:
+                    throw new AssertionError();
+            }
+        }
     }
 
     public enum DiskFailurePolicy
@@ -1264,7 +1290,7 @@ public class Config
     public double severity_during_decommission = 0;
 
     // TODO Revisit MessagingService::current_version
-    public StorageCompatibilityMode storage_compatibility_mode = StorageCompatibilityMode.NONE;
+    public StorageCompatibilityMode storage_compatibility_mode;
 
     /**
      * For the purposes of progress barrier we only support ALL, EACH_QUORUM, QUORUM, LOCAL_QUORUM, ANY, and ONE.
@@ -1273,11 +1299,42 @@ public class Config
      * collect enough nodes.
      */
     public volatile ConsistencyLevel progress_barrier_min_consistency_level = ConsistencyLevel.EACH_QUORUM;
-    public volatile boolean log_out_of_token_range_requests = true;
-    public volatile boolean reject_out_of_token_range_requests = true;
     public volatile ConsistencyLevel progress_barrier_default_consistency_level = ConsistencyLevel.EACH_QUORUM;
 
     public volatile DurationSpec.LongMillisecondsBound progress_barrier_timeout = new DurationSpec.LongMillisecondsBound("3600000ms");
     public volatile DurationSpec.LongMillisecondsBound progress_barrier_backoff = new DurationSpec.LongMillisecondsBound("1000ms");
+    public volatile DurationSpec.LongSecondsBound discovery_timeout = new DurationSpec.LongSecondsBound("30s");
     public boolean unsafe_tcm_mode = false;
+
+    public enum TriggersPolicy
+    {
+        // Execute triggers
+        enabled,
+        // Don't execute triggers when executing queries
+        disabled,
+        // Throw an exception when attempting to execute a trigger
+        forbidden
+    }
+
+    public TriggersPolicy triggers_policy = TriggersPolicy.enabled;
+
+    /**
+     * Which timestamp should be used to represent a base for replica-side timeouts.
+     * Client-side timeout is always based on the QUEUE, and is controlled by native_transport_timeout.
+     */
+    public enum CQLStartTime
+    {
+        REQUEST, // uses a timestamp that represent the start of processing of the request
+        QUEUE    // uses a timestamp that represents when the request was enqueued
+    }
+    public volatile CQLStartTime cql_start_time = CQLStartTime.REQUEST;
+
+    public boolean native_transport_throw_on_overload = false;
+    public double native_transport_queue_max_item_age_threshold = Double.MAX_VALUE;
+    public DurationSpec.LongMillisecondsBound native_transport_min_backoff_on_queue_overload = new DurationSpec.LongMillisecondsBound("10ms");
+    public DurationSpec.LongMillisecondsBound native_transport_max_backoff_on_queue_overload = new DurationSpec.LongMillisecondsBound("200ms");
+
+    // 3.x Cassandra Driver has its "read" timeout set to 12 seconds, default matches this.
+    public DurationSpec.LongMillisecondsBound native_transport_timeout = new DurationSpec.LongMillisecondsBound("12s");
+    public boolean enforce_native_deadline_for_hints = false;
 }

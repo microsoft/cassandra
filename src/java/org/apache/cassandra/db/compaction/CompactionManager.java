@@ -233,7 +233,11 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
     {
         if (cfs.isAutoCompactionDisabled())
         {
-            logger.trace("Autocompaction is disabled");
+            logger.debug("Autocompaction on {}.{} is disabled (disabled: {}, paused: {})",
+                         cfs.keyspace.getName(), cfs.name,
+                         !cfs.getCompactionStrategyManager().isEnabled(),
+                         !cfs.getCompactionStrategyManager().isActive());
+
             return Collections.emptyList();
         }
 
@@ -246,8 +250,10 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
         int count = compactingCF.count(cfs);
         if (count > 0 && executor.getActiveTaskCount() >= executor.getMaximumPoolSize())
         {
-            logger.trace("Background compaction is still running for {}.{} ({} remaining). Skipping",
-                         cfs.getKeyspaceName(), cfs.name, count);
+            if (logger.isTraceEnabled())
+                logger.trace("Background compaction is still running for {}.{} ({} remaining). Skipping",
+                             cfs.getKeyspaceName(), cfs.name, count);
+
             return Collections.emptyList();
         }
 
@@ -1161,6 +1167,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
         return sstables;
     }
 
+    @Override
     public void forceUserDefinedCompaction(String dataFiles)
     {
         String[] filenames = dataFiles.split(",");
@@ -1187,6 +1194,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
         FBUtilities.waitOnFutures(futures);
     }
 
+    @Override
     public void forceUserDefinedCleanup(String dataFiles)
     {
         String[] filenames = dataFiles.split(",");
@@ -1437,10 +1445,9 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
         long totalkeysWritten = 0;
 
         long expectedBloomFilterSize = Math.max(cfs.metadata().params.minIndexInterval,
-                                               SSTableReader.getApproximateKeyCount(txn.originals()));
-        if (logger.isTraceEnabled())
-            logger.trace("Expected bloom filter size : {}", expectedBloomFilterSize);
+                                                SSTableReader.getApproximateKeyCount(txn.originals()));
 
+        logger.trace("Expected bloom filter size : {}", expectedBloomFilterSize);
         logger.info("Cleaning up {}", sstable);
 
         File compactionFileLocation = sstable.descriptor.directory;
@@ -2167,6 +2174,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
         }
     }
 
+    @Override
     public List<Map<String, String>> getCompactions()
     {
         List<Holder> compactionHolders = active.getCompactions();
@@ -2176,6 +2184,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
         return out;
     }
 
+    @Override
     public List<String> getCompactionSummary()
     {
         List<Holder> compactionHolders = active.getCompactions();
@@ -2185,6 +2194,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
         return out;
     }
 
+    @Override
     public TabularData getCompactionHistory()
     {
         try
@@ -2218,6 +2228,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
         return metrics.completedTasks.getValue();
     }
 
+    @Override
     public void stopCompaction(String type)
     {
         OperationType operation = OperationType.valueOf(type);
@@ -2228,6 +2239,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
         }
     }
 
+    @Override
     public void stopCompactionById(String compactionId)
     {
         for (Holder holder : active.getCompactions())
@@ -2239,6 +2251,26 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
     }
 
     public void setConcurrentCompactors(int value)
+    {
+        adjustCoreSize(executor, value);
+    }
+
+    public void setConcurrentValidations()
+    {
+        validationExecutor.adjustPoolSize();
+    }
+
+    public void setConcurrentViewBuilders(int value)
+    {
+        adjustCoreSize(viewBuildExecutor, value);
+    }
+
+    public void setConcurrentIndexBuilders(int value)
+    {
+        adjustCoreSize(secondaryIndexExecutor, value);
+    }
+
+    private void adjustCoreSize(CompactionExecutor executor, int value)
     {
         if (value > executor.getCorePoolSize())
         {
@@ -2254,72 +2286,85 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
         }
     }
 
-    public void setConcurrentValidations()
-    {
-        validationExecutor.adjustPoolSize();
-    }
-
-    public void setConcurrentViewBuilders(int value)
-    {
-        if (value > viewBuildExecutor.getCorePoolSize())
-        {
-            // we are increasing the value
-            viewBuildExecutor.setMaximumPoolSize(value);
-            viewBuildExecutor.setCorePoolSize(value);
-        }
-        else if (value < viewBuildExecutor.getCorePoolSize())
-        {
-            // we are reducing the value
-            viewBuildExecutor.setCorePoolSize(value);
-            viewBuildExecutor.setMaximumPoolSize(value);
-        }
-    }
-
+    @Override
     public int getCoreCompactorThreads()
     {
         return executor.getCorePoolSize();
     }
 
+    @Override
     public void setCoreCompactorThreads(int number)
     {
         executor.setCorePoolSize(number);
     }
 
+    @Override
     public int getMaximumCompactorThreads()
     {
         return executor.getMaximumPoolSize();
     }
 
+    @Override
     public void setMaximumCompactorThreads(int number)
     {
         executor.setMaximumPoolSize(number);
     }
 
+    @Override
     public int getCoreValidationThreads()
     {
         return validationExecutor.getCorePoolSize();
     }
 
+    @Override
     public void setCoreValidationThreads(int number)
     {
         validationExecutor.setCorePoolSize(number);
     }
 
+    @Override
     public int getMaximumValidatorThreads()
     {
         return validationExecutor.getMaximumPoolSize();
     }
 
+    @Override
     public void setMaximumValidatorThreads(int number)
     {
         validationExecutor.setMaximumPoolSize(number);
     }
 
+    @Override
+    public int getMaximumSecondaryIndexExecutorThreads()
+    {
+        return secondaryIndexExecutor.getMaximumPoolSize();
+    }
+
+    @Override
+    public void setMaximumSecondaryIndexExecutorThreads(int number)
+    {
+        secondaryIndexExecutor.setMaximumPoolSize(number);
+    }
+
+    @Override
+    public int getCoreSecondaryIndexExecutorThreads()
+    {
+        return secondaryIndexExecutor.getCorePoolSize();
+    }
+
+    @Override
+    public void setCoreSecondaryIndexExecutorThreads(int number)
+    {
+        secondaryIndexExecutor.setCorePoolSize(number);
+    }
+
+    @Override
     public boolean getDisableSTCSInL0()
     {
         return DatabaseDescriptor.getDisableSTCSInL0();
     }
 
+    @Override
     public void setDisableSTCSInL0(boolean disabled)
     {
         if (disabled != DatabaseDescriptor.getDisableSTCSInL0())
@@ -2327,41 +2372,49 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
         DatabaseDescriptor.setDisableSTCSInL0(disabled);
     }
 
+    @Override
     public int getCoreViewBuildThreads()
     {
         return viewBuildExecutor.getCorePoolSize();
     }
 
+    @Override
     public void setCoreViewBuildThreads(int number)
     {
         viewBuildExecutor.setCorePoolSize(number);
     }
 
+    @Override
     public int getMaximumViewBuildThreads()
     {
         return viewBuildExecutor.getMaximumPoolSize();
     }
 
+    @Override
     public void setMaximumViewBuildThreads(int number)
     {
         viewBuildExecutor.setMaximumPoolSize(number);
     }
 
+    @Override
     public boolean getAutomaticSSTableUpgradeEnabled()
     {
         return DatabaseDescriptor.automaticSSTableUpgrade();
     }
 
+    @Override
     public void setAutomaticSSTableUpgradeEnabled(boolean enabled)
     {
         DatabaseDescriptor.setAutomaticSSTableUpgradeEnabled(enabled);
     }
 
+    @Override
     public int getMaxConcurrentAutoUpgradeTasks()
     {
         return DatabaseDescriptor.maxConcurrentAutoUpgradeTasks();
     }
 
+    @Override
     public void setMaxConcurrentAutoUpgradeTasks(int value)
     {
         try

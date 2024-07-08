@@ -64,6 +64,7 @@ import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.vint.VIntCoding;
 
+import static com.google.common.collect.ImmutableList.of;
 import static org.apache.cassandra.tcm.Transformation.Kind.FINISH_REPLACE;
 import static org.apache.cassandra.tcm.Transformation.Kind.MID_REPLACE;
 import static org.apache.cassandra.tcm.Transformation.Kind.START_REPLACE;
@@ -171,6 +172,12 @@ public class BootstrapAndReplace extends MultiStepOperation<Epoch>
     }
 
     @Override
+    public Transformation.Result applyTo(ClusterMetadata metadata)
+    {
+        return applyMultipleTransformations(metadata, next, of(startReplace, midReplace, finishReplace));
+    }
+
+    @Override
     public SequenceState executeNext()
     {
         switch (next)
@@ -252,10 +259,11 @@ public class BootstrapAndReplace extends MultiStepOperation<Epoch>
                 }
                 break;
             case FINISH_REPLACE:
+                ClusterMetadata metadata;
                 try
                 {
                     SystemKeyspace.setBootstrapState(SystemKeyspace.BootstrapState.COMPLETED);
-                    ClusterMetadataService.instance().commit(finishReplace);
+                    metadata = ClusterMetadataService.instance().commit(finishReplace);
                 }
                 catch (Throwable e)
                 {
@@ -263,6 +271,8 @@ public class BootstrapAndReplace extends MultiStepOperation<Epoch>
                     logger.warn("Got exception committing finishReplace", e);
                     return halted();
                 }
+                ClusterMetadataService.instance().ensureCMSPlacement(metadata);
+
                 break;
             default:
                 return error(new IllegalStateException("Can't proceed with replacement from " + next));

@@ -20,6 +20,8 @@ package org.apache.cassandra.tcm;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Collections;
+import java.util.List;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,8 +36,10 @@ public interface MetadataSnapshots
 {
     Logger logger = LoggerFactory.getLogger(MetadataSnapshots.class);
 
-    ClusterMetadata getLatestSnapshotAfter(Epoch epoch);
     ClusterMetadata getSnapshot(Epoch epoch);
+    ClusterMetadata getSnapshotBefore(Epoch epoch);
+    ClusterMetadata getLatestSnapshot();
+    List<Epoch> listSnapshotsSince(Epoch epoch);
     void storeSnapshot(ClusterMetadata metadata);
 
     static ByteBuffer toBytes(ClusterMetadata metadata) throws IOException
@@ -61,21 +65,26 @@ public interface MetadataSnapshots
                                                      new DataInputBuffer(serialized, false));
     }
 
-
     MetadataSnapshots NO_OP = new NoOp();
 
-    public class NoOp implements MetadataSnapshots
+    class NoOp implements MetadataSnapshots
     {
         @Override
-        public ClusterMetadata getLatestSnapshotAfter(Epoch epoch)
+        public ClusterMetadata getSnapshot(Epoch epoch)
         {
             return null;
         }
 
         @Override
-        public ClusterMetadata getSnapshot(Epoch epoch)
+        public ClusterMetadata getSnapshotBefore(Epoch epoch) {return null;}
+
+        @Override
+        public ClusterMetadata getLatestSnapshot() {return null;}
+
+        @Override
+        public List<Epoch> listSnapshotsSince(Epoch epoch)
         {
-            return null;
+            return Collections.emptyList();
         }
 
         @Override
@@ -84,13 +93,6 @@ public interface MetadataSnapshots
 
     class SystemKeyspaceMetadataSnapshots implements MetadataSnapshots
     {
-        @Override
-        public ClusterMetadata getLatestSnapshotAfter(Epoch epoch)
-        {
-            Sealed sealed = Sealed.lookupForSnapshot(epoch);
-            return sealed.epoch.isAfter(epoch) ? getSnapshot(sealed.epoch) : null;
-        }
-
         @Override
         public ClusterMetadata getSnapshot(Epoch epoch)
         {
@@ -106,11 +108,47 @@ public interface MetadataSnapshots
         }
 
         @Override
+        public ClusterMetadata getSnapshotBefore(Epoch epoch)
+        {
+            try
+            {
+                return fromBytes(SystemKeyspace.findSnapshotBefore(epoch));
+            }
+            catch (IOException e)
+            {
+                logger.error("Could not load snapshot before " + epoch, e);
+                return null;
+            }
+        }
+
+        @Override
+        public ClusterMetadata getLatestSnapshot()
+        {
+            try
+            {
+                ByteBuffer snapshot = SystemKeyspace.findLastSnapshot();
+                if (snapshot != null)
+                    return fromBytes(snapshot);
+            }
+            catch (IOException e)
+            {
+                logger.error("Could not find latest snapshot");
+            }
+            return null;
+        }
+
+        @Override
+        public List<Epoch> listSnapshotsSince(Epoch epoch)
+        {
+            return SystemKeyspace.listSnapshotsSince(epoch);
+        }
+
+        @Override
         public void storeSnapshot(ClusterMetadata metadata)
         {
             try
             {
-                SystemKeyspace.storeSnapshot(metadata.epoch, metadata.period, toBytes(metadata));
+                SystemKeyspace.storeSnapshot(metadata.epoch, toBytes(metadata));
             }
             catch (IOException e)
             {

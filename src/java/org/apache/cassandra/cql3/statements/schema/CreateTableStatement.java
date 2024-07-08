@@ -26,9 +26,6 @@ import com.google.common.collect.ImmutableSet;
 
 import org.apache.commons.lang3.StringUtils;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import org.apache.cassandra.audit.AuditLogContext;
 import org.apache.cassandra.audit.AuditLogEntryType;
 import org.apache.cassandra.auth.DataResource;
@@ -55,7 +52,6 @@ import static com.google.common.collect.Iterables.concat;
 
 public final class CreateTableStatement extends AlterSchemaStatement
 {
-    private static final Logger logger = LoggerFactory.getLogger(CreateTableStatement.class);
     private final String tableName;
 
     private final Map<ColumnIdentifier, ColumnProperties.Raw> rawColumns;
@@ -68,6 +64,8 @@ public final class CreateTableStatement extends AlterSchemaStatement
 
     private final boolean ifNotExists;
     private final boolean useCompactStorage;
+
+    private String expandedCql;
 
     public CreateTableStatement(String keyspaceName,
                                 String tableName,
@@ -95,6 +93,14 @@ public final class CreateTableStatement extends AlterSchemaStatement
         this.useCompactStorage = useCompactStorage;
     }
 
+    @Override
+    public String cql()
+    {
+        if (expandedCql != null)
+            return expandedCql;
+        return super.cql();
+    }
+
     public Keyspaces apply(ClusterMetadata metadata)
     {
         Keyspaces schema = metadata.schema.getKeyspaces();
@@ -110,8 +116,18 @@ public final class CreateTableStatement extends AlterSchemaStatement
             throw new AlreadyExistsException(keyspaceName, tableName);
         }
 
-        TableMetadata.Builder builder = builder(keyspace.types).epoch(metadata.nextEpoch());
-        if (!builder.hasId() && !DatabaseDescriptor.useDeterministicTableID())
+        // add all user functions to be able to give a good error message to the user if the alter references
+        // a function from another keyspace
+        UserFunctions.Builder ufBuilder = UserFunctions.builder().add();
+        for (KeyspaceMetadata ksm : schema)
+            ufBuilder.add(ksm.userFunctions);
+
+        TableMetadata.Builder builder = builder(keyspace.types, ufBuilder.build()).epoch(metadata.nextEpoch());
+
+        // We do not want to set table ID here just yet, since we are using CQL for serialising a fully expanded CREATE TABLE statement.
+        this.expandedCql = builder.build().toCqlString(false, attrs.hasProperty(TableAttributes.ID), ifNotExists);
+
+        if (!attrs.hasProperty(TableAttributes.ID) && !DatabaseDescriptor.useDeterministicTableID())
             builder.id(TableId.get(metadata));
         TableMetadata table = builder.build();
         table.validate();
@@ -189,14 +205,14 @@ public final class CreateTableStatement extends AlterSchemaStatement
         return String.format("%s (%s, %s)", getClass().getSimpleName(), keyspaceName, tableName);
     }
 
-    public TableMetadata.Builder builder(Types types)
+    public TableMetadata.Builder builder(Types types, UserFunctions functions)
     {
         attrs.validate();
         TableParams params = attrs.asNewTableParams();
 
         // use a TreeMap to preserve ordering across JDK versions (see CASSANDRA-9492) - important for stable unit tests
         Map<ColumnIdentifier, ColumnProperties> columns = new TreeMap<>(comparing(o -> o.bytes));
-        rawColumns.forEach((column, properties) -> columns.put(column, properties.prepare(keyspaceName, tableName, column, types)));
+        rawColumns.forEach((column, properties) -> columns.put(column, properties.prepare(keyspaceName, tableName, column, types, functions)));
 
         // check for nested non-frozen UDTs or collections in a non-frozen UDT
         columns.forEach((column, properties) ->
@@ -469,7 +485,7 @@ public final class CreateTableStatement extends AlterSchemaStatement
         return CQLFragmentParser.parseAny(CqlParser::createTableStatement, cql, "CREATE TABLE")
                                 .keyspace(keyspace)
                                 .prepare(null) // works around a messy ClientState/QueryProcessor class init deadlock
-                                .builder(Types.none());
+                                .builder(Types.none(), UserFunctions.none());
     }
 
     public final static class Raw extends CQLStatement.Raw
@@ -614,11 +630,11 @@ public final class CreateTableStatement extends AlterSchemaStatement
                     ColumnMask.ensureEnabled();
             }
 
-            public ColumnProperties prepare(String keyspace, String table, ColumnIdentifier column, Types udts)
+            public ColumnProperties prepare(String keyspace, String table, ColumnIdentifier column, Types udts, UserFunctions functions)
             {
                 CQL3Type cqlType = rawType.prepare(keyspace, udts);
                 AbstractType<?> type = cqlType.getType();
-                ColumnMask mask = rawMask == null ? null : rawMask.prepare(keyspace, table, column, type);
+                ColumnMask mask = rawMask == null ? null : rawMask.prepare(keyspace, table, column, type, functions);
                 return new ColumnProperties(type, cqlType, mask);
             }
         }

@@ -18,6 +18,7 @@
 
 package org.apache.cassandra.tcm.log;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.function.Supplier;
 
@@ -30,14 +31,13 @@ import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.schema.SchemaConstants;
+import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.tcm.Epoch;
 import org.apache.cassandra.tcm.MetadataSnapshots;
-import org.apache.cassandra.tcm.Period;
 import org.apache.cassandra.tcm.Transformation;
 
 import static org.apache.cassandra.cql3.QueryProcessor.executeInternal;
-import static org.apache.cassandra.db.SystemKeyspace.LocalMetadataLog;
 
 public class SystemKeyspaceStorage implements LogStorage
 {
@@ -49,7 +49,7 @@ public class SystemKeyspaceStorage implements LogStorage
      * If you make any changes to the tables below, make sure to increment the
      * generation and document your change here.
      * <p>
-     * gen 0: original definition in 5.0
+     * gen 0: original definition in 5.1
      */
     public static final long GENERATION = 0;
 
@@ -67,16 +67,15 @@ public class SystemKeyspaceStorage implements LogStorage
     }
 
     // This method is always called from a single thread, so doesn't have to be synchonised.
-    public void append(long period, Entry entry)
+    public void append(Entry entry)
     {
         try
         {
             // TODO get lowest supported metadata version from ClusterMetadata
             ByteBuffer serializedTransformation = entry.transform.kind().toVersionedBytes(entry.transform);
-            String query = String.format("INSERT INTO %s.%s (period, epoch, current_epoch, entry_id, transformation, kind) VALUES (?,?,?,?,?,?)",
+            String query = String.format("INSERT INTO %s.%s (epoch, entry_id, transformation, kind) VALUES (?,?,?,?)",
                                          SchemaConstants.SYSTEM_KEYSPACE_NAME, NAME);
-            executeInternal(query, period, entry.epoch.getEpoch(), entry.epoch.getEpoch(),
-                            entry.id.entryId, serializedTransformation, entry.transform.kind().toString());
+            executeInternal(query, entry.epoch.getEpoch(), entry.id.entryId, serializedTransformation, entry.transform.kind().id);
             // todo; should probably not flush every time, but it simplifies tests
             Keyspace.open(SchemaConstants.SYSTEM_KEYSPACE_NAME).getColumnFamilyStore(NAME).forceBlockingFlush(ColumnFamilyStore.FlushReason.INTERNALLY_FORCED);
         }
@@ -96,66 +95,87 @@ public class SystemKeyspaceStorage implements LogStorage
         return false;
     }
 
-    public LogState getLogState(Epoch since)
+    @Override
+    public MetadataSnapshots snapshots()
     {
-        return LogState.getLogState(since, snapshots.get(), this);
+        return snapshots.get();
+    }
+
+    public void truncate()
+    {
+        Keyspace.open(SchemaConstants.SYSTEM_KEYSPACE_NAME).getColumnFamilyStore(NAME).truncateBlockingWithoutSnapshot();
     }
 
     /**
-     * Uses the supplied period as a starting point to iterate through the log table
-     * collating log entries which follow the supplied epoch. It is assumed that the
-     * target epoch is found in the starting period, so any entries returned will be
-     * from either the starting period or subsequent periods.
-     * @param since target epoch
-     * @return contiguous list of log entries which follow the given epoch,
-     *         which may be empty
-     * @param startPeriod
-     * @param since
+     * Gets the persisted log state for replaying log on startup
+     *
+     * Slow, only to be used on startup
+     *
      * @return
      */
-    public Replication getReplication(long startPeriod, Epoch since)
+    @Override
+    public LogState getPersistedLogState()
+    {
+        ClusterMetadata base = snapshots.get().getLatestSnapshot();
+        return getLogStateBetween(base, Epoch.create(Long.MAX_VALUE));
+    }
+
+    @Override
+    public EntryHolder getEntries(Epoch since) throws IOException
+    {
+        // during gossip upgrade we have epoch = Long.MIN_VALUE + 1 (and the reverse partitioner doesn't support negative keys)
+        since = since.isBefore(Epoch.EMPTY) ? Epoch.EMPTY : since;
+        UntypedResultSet resultSet = executeInternal(String.format("SELECT epoch, kind, transformation, entry_id FROM %s.%s WHERE token(epoch) <= token(?)", SchemaConstants.SYSTEM_KEYSPACE_NAME, NAME),
+                                                     since.getEpoch());
+        return toEntryHolder(since, resultSet);
+    }
+
+    public EntryHolder getEntries(Epoch since, Epoch until) throws IOException
+    {
+        // during gossip upgrade we have epoch = Long.MIN_VALUE + 1 (and the reverse partitioner doesn't support negative keys)
+        since = since.isBefore(Epoch.EMPTY) ? Epoch.EMPTY : since;
+        UntypedResultSet resultSet = executeInternal(String.format("SELECT epoch, kind, transformation, entry_id " +
+                                                                   "FROM %s.%s " +
+                                                                   "WHERE token(epoch) <= token(?) AND token(epoch) >= token(?)",
+                                                                   SchemaConstants.SYSTEM_KEYSPACE_NAME, NAME),
+                                                     since.getEpoch(), until.getEpoch());
+        return toEntryHolder(since, resultSet);
+    }
+
+    private static EntryHolder toEntryHolder(Epoch since, UntypedResultSet resultSet) throws IOException
+    {
+        EntryHolder holder = new EntryHolder(since);
+        for (UntypedResultSet.Row row : resultSet)
+        {
+            long entryId = row.getLong("entry_id");
+            Epoch epoch = Epoch.create(row.getLong("epoch"));
+            Transformation.Kind kind = Transformation.Kind.fromId(row.getInt("kind"));
+            Transformation transform = kind.fromVersionedBytes(row.getBlob("transformation"));
+            holder.add(new Entry(new Entry.Id(entryId), epoch, transform));
+        }
+        return holder;
+    }
+
+    @Override
+    public LogState getLogStateBetween(ClusterMetadata base, Epoch end)
     {
         try
         {
-            if (startPeriod == Period.EMPTY)
+            Epoch epoch = base == null ? Epoch.EMPTY : base.epoch;
+            EntryHolder entryHolder = getEntries(epoch, end);
+            ImmutableList.Builder<Entry> entries = ImmutableList.builder();
+            Epoch prevEpoch = epoch;
+            for (Entry e : entryHolder.entries)
             {
-                startPeriod = Period.scanLogForPeriod(LocalMetadataLog, since);
-                if (startPeriod == Period.EMPTY)
-                    return Replication.EMPTY;
+                if (!prevEpoch.nextEpoch().is(e.epoch))
+                    throw new IllegalStateException("Can't get replication between " + epoch + " and " + end + " - incomplete local log?");
+                prevEpoch = e.epoch;
+                entries.add(e);
             }
-
-            long period = startPeriod;
-            ImmutableList.Builder<Entry> entries = new ImmutableList.Builder<>();
-            while (true)
-            {
-                boolean empty = true;
-
-                UntypedResultSet resultSet = executeInternal(String.format("SELECT epoch, kind, transformation, entry_id FROM %s.%s WHERE period = ? and epoch > ?", SchemaConstants.SYSTEM_KEYSPACE_NAME, NAME),
-                                                             period, since.getEpoch());
-
-                for (UntypedResultSet.Row row : resultSet)
-                {
-                    long entryId = row.getLong("entry_id");
-                    Epoch epoch = Epoch.create(row.getLong("epoch"));
-                    ByteBuffer transformationBlob = row.getBlob("transformation");
-                    Transformation.Kind kind = Transformation.Kind.valueOf(row.getString("kind"));
-                    Transformation transform = kind.fromVersionedBytes(transformationBlob);
-                    kind.fromVersionedBytes(transformationBlob);
-                    entries.add(new Entry(new Entry.Id(entryId), epoch, transform));
-                    empty = false;
-                }
-
-                if (period != startPeriod && empty)
-                    break;
-
-                period++;
-            }
-
-            return new Replication(entries.build());
+            return new LogState(base, entries.build());
         }
-        catch (Exception e)
+        catch (IOException e)
         {
-            logger.error("Could not restore the state.", e);
             throw new RuntimeException(e);
         }
     }

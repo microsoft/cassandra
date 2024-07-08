@@ -21,10 +21,12 @@ package org.apache.cassandra.schema;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Set;
+import java.util.function.Supplier;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+
+import org.apache.cassandra.locator.MetaStrategy;
+import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -33,19 +35,14 @@ import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.cql3.statements.schema.CreateTableStatement;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.exceptions.CasWriteTimeoutException;
-import org.apache.cassandra.metrics.TCMMetrics;
 import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.tcm.Epoch;
 import org.apache.cassandra.tcm.MetadataSnapshots;
-import org.apache.cassandra.tcm.Period;
-import org.apache.cassandra.tcm.Retry;
 import org.apache.cassandra.tcm.Transformation;
 import org.apache.cassandra.tcm.log.Entry;
 import org.apache.cassandra.tcm.log.LogReader;
 import org.apache.cassandra.tcm.log.LogState;
-import org.apache.cassandra.tcm.log.Replication;
 import org.apache.cassandra.tcm.transformations.cms.PreInitialize;
-import org.apache.cassandra.utils.JVMStabilityInspector;
 
 import static org.apache.cassandra.tcm.Epoch.FIRST;
 
@@ -66,18 +63,17 @@ public final class DistributedMetadataLogKeyspace
      */
     public static final long GENERATION = 0;
 
+    public static final TableId LOG_TABLE_ID = TableId.unsafeDeterministic(SchemaConstants.METADATA_KEYSPACE_NAME, TABLE_NAME);
     public static final String LOG_TABLE_CQL = "CREATE TABLE %s.%s ("
-                                               + "period bigint,"
-                                               + "current_epoch bigint static,"
-                                               + "sealed boolean static,"
                                                + "epoch bigint,"
                                                + "entry_id bigint,"
                                                + "transformation blob,"
-                                               + "kind text,"
-                                               + "PRIMARY KEY (period, epoch))";
+                                               + "kind int,"
+                                               + "PRIMARY KEY (epoch))";
 
     public static final TableMetadata Log =
         parse(LOG_TABLE_CQL, TABLE_NAME, "Log")
+        .partitioner(MetaStrategy.partitioner)
         .compaction(CompactionParams.twcs(ImmutableMap.of("compaction_window_unit","DAYS",
                                                           "compaction_window_size","1")))
         .build();
@@ -86,22 +82,34 @@ public final class DistributedMetadataLogKeyspace
     {
         try
         {
-            String init = String.format("INSERT INTO %s.%s (period, epoch, current_epoch, transformation, kind, entry_id, sealed) " +
-                                        "VALUES(?, ?, ?, ?, ?, ?, false) " +
+            String init = String.format("INSERT INTO %s.%s (epoch, transformation, kind, entry_id) " +
+                                        "VALUES(?, ?, ?, ?) " +
                                         "IF NOT EXISTS", SchemaConstants.METADATA_KEYSPACE_NAME, TABLE_NAME);
             UntypedResultSet result = QueryProcessor.execute(init, ConsistencyLevel.QUORUM,
-                                                             Period.FIRST, FIRST.getEpoch(), FIRST.getEpoch(),
-                                                             Transformation.Kind.PRE_INITIALIZE_CMS.toVersionedBytes(PreInitialize.blank()), Transformation.Kind.PRE_INITIALIZE_CMS.toString(), Entry.Id.NONE.entryId);
+                                                             FIRST.getEpoch(),
+                                                             Transformation.Kind.PRE_INITIALIZE_CMS.toVersionedBytes(PreInitialize.blank()),
+                                                             Transformation.Kind.PRE_INITIALIZE_CMS.id,
+                                                             Entry.Id.NONE.entryId);
 
-            return result.one().getBoolean("[applied]");
+            UntypedResultSet.Row row = result.one();
+            if (row.getBoolean("[applied]"))
+                return true;
+
+            if (row.getLong("epoch") == FIRST.getEpoch() &&
+                row.getLong("entry_id") == Entry.Id.NONE.entryId &&
+                Transformation.Kind.PRE_INITIALIZE_CMS.id == row.getInt("kind"))
+                return true;
+
+            throw new IllegalStateException("Could not initialize log.");
         }
         catch (CasWriteTimeoutException t)
         {
-            logger.warn("Timed out wile trying to CAS", t);
+            logger.warn("Timed out while trying to CAS", t);
             return false;
         }
         catch (Throwable t)
         {
+            JVMStabilityInspector.inspectThrowable(t);
             logger.error("Caught an exception while trying to CAS", t);
             return false;
         }
@@ -110,10 +118,7 @@ public final class DistributedMetadataLogKeyspace
     public static boolean tryCommit(Entry.Id entryId,
                                     Transformation transform,
                                     Epoch previousEpoch,
-                                    Epoch nextEpoch,
-                                    long previousPeriod,
-                                    long nextPeriod,
-                                    boolean sealCurrentPeriod)
+                                    Epoch nextEpoch)
     {
         try
         {
@@ -123,36 +128,22 @@ public final class DistributedMetadataLogKeyspace
             // TODO get lowest supported metadata version from ClusterMetadata
             ByteBuffer serializedEvent = transform.kind().toVersionedBytes(transform);
 
-            UntypedResultSet result;
-            if (previousPeriod + 1 == nextPeriod || ClusterMetadataService.state() == ClusterMetadataService.State.RESET)
-            {
-                String query = String.format("INSERT INTO %s.%s (period, epoch, current_epoch, entry_id, transformation, kind, sealed) " +
-                                             "VALUES (?, ?, ?, ?, ?, ?, false) " +
-                                             "IF NOT EXISTS;",
-                                             SchemaConstants.METADATA_KEYSPACE_NAME, TABLE_NAME);
-                result = QueryProcessor.execute(query, ConsistencyLevel.QUORUM,
-                                                nextPeriod, nextEpoch.getEpoch(), nextEpoch.getEpoch(), entryId.entryId, serializedEvent, transform.kind().toString());
-            }
-            else
-            {
-                assert previousPeriod == nextPeriod;
-                String query = String.format("UPDATE %s.%s SET current_epoch = ?, sealed = ?, entry_id = ?, transformation = ?, kind = ? " +
-                                             "WHERE period = ? AND epoch = ? " +
-                                             "IF current_epoch = ? and sealed = false;",
-                                             SchemaConstants.METADATA_KEYSPACE_NAME, TABLE_NAME);
-
-                result = QueryProcessor.execute(query,
-                                                ConsistencyLevel.QUORUM,
-                                                nextEpoch.getEpoch(), sealCurrentPeriod,
-                                                entryId.entryId, serializedEvent, transform.kind().toString(),
-                                                previousPeriod, nextEpoch.getEpoch(), previousEpoch.getEpoch());
-            }
+            String query = String.format("INSERT INTO %s.%s (epoch, entry_id, transformation, kind) " +
+                                         "VALUES (?, ?, ?, ?) " +
+                                         "IF NOT EXISTS;",
+                                         SchemaConstants.METADATA_KEYSPACE_NAME, TABLE_NAME);
+            UntypedResultSet result = QueryProcessor.execute(query,
+                                                             ConsistencyLevel.QUORUM,
+                                                             nextEpoch.getEpoch(),
+                                                             entryId.entryId,
+                                                             serializedEvent,
+                                                             transform.kind().id);
 
             return result.one().getBoolean("[applied]");
         }
         catch (CasWriteTimeoutException t)
         {
-            logger.warn("Timed out wile trying to append item to the log: ", t.getMessage());
+            logger.warn("Timed out while trying to append item to the log", t);
             return false;
         }
         catch (Throwable t)
@@ -162,105 +153,57 @@ public final class DistributedMetadataLogKeyspace
         }
     }
 
-    @VisibleForTesting
-    public static void truncateLogState()
-    {
-        QueryProcessor.execute(String.format("TRUNCATE %s.%s", SchemaConstants.METADATA_KEYSPACE_NAME, TABLE_NAME), ConsistencyLevel.QUORUM);
-    }
-
-
     private static final LogReader localLogReader = new DistributedTableLogReader(ConsistencyLevel.NODE_LOCAL);
     private static final LogReader serialLogReader = new DistributedTableLogReader(ConsistencyLevel.SERIAL);
 
     public static LogState getLogState(Epoch since, boolean consistentFetch)
     {
-        return LogState.getLogState(since, ClusterMetadataService.instance().snapshotManager(), consistentFetch ? serialLogReader : localLogReader);
-    }
-
-    @VisibleForTesting
-    public static LogState getLogState(Epoch since, LogReader logReader, MetadataSnapshots snapshots)
-    {
-        Retry retry = new Retry.Jitter(TCMMetrics.instance.fetchLogRetries);
-        while (!retry.reachedMax())
-        {
-            try
-            {
-                return LogState.getLogState(since, snapshots, logReader);
-            }
-            catch (Throwable t)
-            {
-                retry.maybeSleep();
-            }
-        }
-
-        throw new IllegalStateException(String.format("Could not retrieve log state after %s tries.", retry.currentTries()));
+        return (consistentFetch ? serialLogReader : localLogReader).getLogState(since);
     }
 
     public static class DistributedTableLogReader implements LogReader
     {
         private final ConsistencyLevel consistencyLevel;
+        private final Supplier<MetadataSnapshots> snapshots;
+
+        public DistributedTableLogReader(ConsistencyLevel consistencyLevel, Supplier<MetadataSnapshots> snapshots)
+        {
+            this.consistencyLevel = consistencyLevel;
+            this.snapshots = snapshots;
+        }
 
         public DistributedTableLogReader(ConsistencyLevel consistencyLevel)
         {
-            this.consistencyLevel = consistencyLevel;
+            this(consistencyLevel, () -> ClusterMetadataService.instance().snapshotManager());
+        }
+
+        public EntryHolder getEntries(Epoch since) throws IOException
+        {
+            // during gossip upgrade we have epoch = Long.MIN_VALUE + 1 (and the reverse partitioner doesn't support negative keys)
+            since = since.isBefore(Epoch.EMPTY) ? Epoch.EMPTY : since;
+            // note that we want all entries with epoch >= since - but since we use a reverse partitioner, we actually
+            // want all entries where the token is less than token(since)
+            UntypedResultSet resultSet = execute(String.format("SELECT epoch, kind, transformation, entry_id FROM %s.%s WHERE token(epoch) <= token(?)",
+                                                               SchemaConstants.METADATA_KEYSPACE_NAME, TABLE_NAME),
+                                                 consistencyLevel, since.getEpoch());
+            EntryHolder entryHolder = new EntryHolder(since);
+            for (UntypedResultSet.Row row : resultSet)
+            {
+                long entryId = row.getLong("entry_id");
+                Epoch epoch = Epoch.create(row.getLong("epoch"));
+                Transformation.Kind kind = Transformation.Kind.fromId(row.getInt("kind"));
+                Transformation transform = kind.fromVersionedBytes(row.getBlob("transformation"));
+                entryHolder.add(new Entry(new Entry.Id(entryId), epoch, transform));
+            }
+            return entryHolder;
         }
 
         @Override
-        public Replication getReplication(long startPeriod, Epoch since)
+        public MetadataSnapshots snapshots()
         {
-            try
-            {
-                if (startPeriod == Period.EMPTY)
-                {
-                    startPeriod = Period.scanLogForPeriod(Log, since);
-                    // There shouldn't be any entries in period 0, the pre-init transform would bump it to period 1.
-                    if (startPeriod == Period.EMPTY)
-                        return Replication.EMPTY;
-                }
-
-                long currentEpoch = since.getEpoch();
-                long lastEpoch = since.getEpoch();
-
-                long period = startPeriod;
-                ImmutableList.Builder<Entry> entries = new ImmutableList.Builder<>();
-
-                while (true)
-                {
-                    boolean empty = true;
-                    UntypedResultSet resultSet = execute(String.format("SELECT current_epoch, period, epoch, kind, transformation, entry_id, sealed FROM %s.%s WHERE period = ? AND epoch > ?",
-                                                                       SchemaConstants.METADATA_KEYSPACE_NAME, TABLE_NAME),
-                                                         consistencyLevel, period, since.getEpoch());
-
-                    for (UntypedResultSet.Row row : resultSet)
-                    {
-                        currentEpoch = row.getLong("current_epoch");
-                        long epochl = row.getLong("epoch");
-                        Epoch epoch = Epoch.create(epochl);
-                        Transformation.Kind kind = Transformation.Kind.valueOf(row.getString("kind"));
-                        long entryId = row.getLong("entry_id");
-                        Transformation transform = kind.fromVersionedBytes(row.getBlob("transformation"));
-                        entries.add(new Entry(new Entry.Id(entryId), epoch, transform));
-
-                        lastEpoch = currentEpoch;
-                        empty = false;
-                    }
-
-                    if (period != startPeriod && empty)
-                        break;
-
-                    period++;
-                }
-
-                assert currentEpoch == lastEpoch;
-                return new Replication(entries.build());
-            }
-            catch (IOException t)
-            {
-                JVMStabilityInspector.inspectThrowable(t);
-                throw new RuntimeException(t);
-            }
+            return snapshots.get();
         }
-    };
+    }
 
     private static UntypedResultSet execute(String query, ConsistencyLevel cl, Object ... params)
     {
@@ -272,7 +215,7 @@ public final class DistributedMetadataLogKeyspace
     private static TableMetadata.Builder parse(String cql, String table, String description)
     {
         return CreateTableStatement.parse(String.format(cql, SchemaConstants.METADATA_KEYSPACE_NAME, table), SchemaConstants.METADATA_KEYSPACE_NAME)
-                                   .id(TableId.unsafeDeterministic(SchemaConstants.METADATA_KEYSPACE_NAME, table))
+                                   .id(LOG_TABLE_ID)
                                    .epoch(FIRST)
                                    .comment(description);
     }
